@@ -552,26 +552,42 @@ def calcular_tir(custo, vgv_val, meses):
 #  ANÁLISE 1ª vs 2ª PRAÇA
 # ─────────────────────────────────────────────
 
-def analise_pracas(lance_1, lance_2, avaliacao, vgv_val, comissao_pct, itbi_pct, outros):
+def analise_pracas(lance_1, lance_2, avaliacao, vgv_val, comissao_pct, itbi_pct, outros,
+                   lance_atual=0):
     """
     Retorna recomendação fundamentada sobre qual praça atacar.
+    Se lance_atual > 0, calcula também sobre o lance atual (em disputa),
+    mantendo o lance mínimo como referência base.
     """
     if lance_1 == 0 and lance_2 == 0:
         return None
 
     resultados = {}
-    for nome, lance in [("1ª Praça", lance_1), ("2ª Praça", lance_2)]:
-        if lance == 0:
+    for nome, lance_min in [("1ª Praça", lance_1), ("2ª Praça", lance_2)]:
+        if lance_min == 0:
             continue
-        c = custo_total(lance, comissao_pct, itbi_pct, outros)
-        ll, igc, gb = lucro_liq(vgv_val, c["total"])
-        roi_val = ll / c["total"] * 100 if c["total"] > 0 else 0
-        ms = (1 - c["total"] / vgv_val) * 100 if vgv_val > 0 else 0
-        desc_aval = (1 - lance / avaliacao) * 100 if avaliacao > 0 else 0
-        tir12 = calcular_tir(c["total"], vgv_val, 12)
+        # Lance operacional: atual se informado, senão mínimo da praça
+        lance_op_praca = lance_atual if lance_atual > 0 else lance_min
+        # Calcula sobre lance mínimo (base)
+        c_min = custo_total(lance_min, comissao_pct, itbi_pct, outros)
+        ll_min, igc_min, gb_min = lucro_liq(vgv_val, c_min["total"])
+        # Calcula sobre lance atual (operacional)
+        c_op  = custo_total(lance_op_praca, comissao_pct, itbi_pct, outros)
+        ll_op, igc_op, gb_op = lucro_liq(vgv_val, c_op["total"])
+        roi_val  = ll_op / c_op["total"] * 100 if c_op["total"] > 0 else 0
+        ms       = (1 - c_op["total"] / vgv_val) * 100 if vgv_val > 0 else 0
+        desc_aval = (1 - lance_op_praca / avaliacao) * 100 if avaliacao > 0 else 0
+        tir12    = calcular_tir(c_op["total"], vgv_val, 12)
         resultados[nome] = dict(
-            lance=lance, custo=c["total"], lucro=ll, roi=roi_val,
-            margem=ms, desc_aval=desc_aval, tir12=tir12, igc=igc
+            lance=lance_min,           # mínimo (referência)
+            lance_op=lance_op_praca,   # atual ou mínimo
+            custo_min=c_min["total"],  # custo s/ lance mínimo
+            custo=c_op["total"],       # custo s/ lance atual (usado nos KPIs)
+            lucro_min=ll_min,          # lucro s/ lance mínimo
+            lucro=ll_op,               # lucro s/ lance atual
+            roi=roi_val, margem=ms,
+            desc_aval=desc_aval, tir12=tir12, igc=igc_op,
+            tem_atual=(lance_atual > 0 and lance_atual != lance_min),
         )
 
     if not resultados:
@@ -879,7 +895,8 @@ tir_12_op    = calcular_tir(custos_op["total"], vgv_val, 12)
 tir_18_op    = calcular_tir(custos_op["total"], vgv_val, 18)
 
 analise_p    = analise_pracas(lance_1, lance_2, avaliacao, vgv_val,
-                               comissao_pct, itbi_pct, outros_custos + outros_deb)
+                               comissao_pct, itbi_pct, outros_custos + outros_deb,
+                               lance_atual=lance_atual)
 
 # ─────────────────────────────────────────────
 #  KPI CARDS
@@ -959,33 +976,54 @@ with tab1:
             {"<div style='font-size:0.72rem;color:#6a9a8a;margin-top:0.6rem'>Ganho extra aguardando 2ª praça: " + fmt(rec["ganho_extra"]) + "</div>" if rec["ganho_extra"] != 0 else ""}
         </div>""", unsafe_allow_html=True)
 
+        # ── Aviso se há lance atual ──
+        has_atual_praca = any(r.get("tem_atual") for r in res.values())
+        if has_atual_praca:
+            st.markdown(f"""
+            <div class='alert-orange' style='border-color:#ffaa33;color:#ffcc66'>
+                ⚡ LANCE ATUAL {fmt(lance_atual)} aplicado — cálculos de ROI, Lucro, TIR e Margem
+                refletem o lance em disputa. Lance mínimo mantido como referência.
+            </div>""", unsafe_allow_html=True)
+
         # ── Tabela comparativa ──
         col_a, col_b = st.columns(2)
         praça_cols = list(res.keys())
         rows = []
-        metricas = [
-            ("Lance Mínimo",       "lance",    True,  False),
-            ("Custo Total",        "custo",    True,  False),
-            ("Lucro Líquido",      "lucro",    True,  True),
-            ("ROI",                "roi",      False, True),
-            ("Margem Segurança",   "margem",   False, True),
-            ("Desc. s/ Avaliação", "desc_aval",False, True),
-            ("TIR 12 meses",       "tir12",    False, True),
-        ]
+        # Mostra colunas duplas (mínimo / atual) se houver lance atual
+        if has_atual_praca:
+            metricas = [
+                ("Lance Mínimo",       "lance",     True,  False),
+                ("Lance Atual",        "lance_op",  True,  False),
+                ("Custo (mínimo)",     "custo_min", True,  False),
+                ("Custo (atual)",      "custo",     True,  False),
+                ("Lucro (mínimo)",     "lucro_min", True,  True),
+                ("Lucro (atual)",      "lucro",     True,  True),
+                ("ROI (atual)",        "roi",       False, True),
+                ("Margem (atual)",     "margem",    False, True),
+                ("Desc. Avaliação",    "desc_aval", False, True),
+                ("TIR 12m (atual)",    "tir12",     None,  True),
+            ]
+        else:
+            metricas = [
+                ("Lance Mínimo",       "lance",     True,  False),
+                ("Custo Total",        "custo",     True,  False),
+                ("Lucro Líquido",      "lucro",     True,  True),
+                ("ROI",                "roi",       False, True),
+                ("Margem Segurança",   "margem",    False, True),
+                ("Desc. s/ Avaliação", "desc_aval", False, True),
+                ("TIR 12 meses",       "tir12",     None,  True),
+            ]
+
         for label, campo, is_money, higher_better in metricas:
             row = {"Métrica": label}
-            vals = []
             for p in praça_cols:
-                v = res[p][campo]
+                v = res[p].get(campo, 0)
                 if campo == "tir12":
                     row[p] = f"{v*100:.1f}%" if v else "N/C"
-                    vals.append(v or 0)
                 elif is_money:
                     row[p] = fmt(v)
-                    vals.append(v)
                 else:
                     row[p] = f"{v:.1f}%"
-                    vals.append(v)
             rows.append(row)
 
         df_comp = pd.DataFrame(rows)
@@ -997,10 +1035,8 @@ with tab1:
         # ── Gráfico radar ──
         with col_b:
             if len(res) >= 2:
-                cats = ["ROI", "Margem\nSegurança", "Desc.\nAvaliação", "Lucro\nNorm."]
-                p_names = list(res.keys())
+                cats = ["ROI", "Margem", "Desc. Aval.", "Lucro Norm."]
                 lucro_max = max(r["lucro"] for r in res.values()) or 1
-
                 fig = go.Figure()
                 colors = ["#2a7aaa", "#22aa55"]
                 for i, (pname, rdata) in enumerate(res.items()):
@@ -1010,12 +1046,16 @@ with tab1:
                         min(rdata["desc_aval"], 100),
                         rdata["lucro"] / lucro_max * 100,
                     ]
+                    hex_c = colors[i]
+                    r_int = int(hex_c[1:3],16)
+                    g_int = int(hex_c[3:5],16)
+                    b_int = int(hex_c[5:7],16)
                     fig.add_trace(go.Scatterpolar(
                         r=vals_radar + [vals_radar[0]],
                         theta=cats + [cats[0]],
                         fill="toself",
-                        fillcolor=f"rgba({','.join(str(int(c,16)) for c in [colors[i][1:3],colors[i][3:5],colors[i][5:]])},0.15)",
-                        line=dict(color=colors[i], width=2),
+                        fillcolor=f"rgba({r_int},{g_int},{b_int},0.15)",
+                        line=dict(color=hex_c, width=2),
                         name=pname,
                     ))
                 fig.update_layout(
@@ -1028,43 +1068,36 @@ with tab1:
                         angularaxis=dict(gridcolor="#0f1e2e", linecolor="#1a2e42",
                                          tickfont=dict(size=9, color="#7a9ab8")),
                     ),
-                    title="Radar · 1ª vs 2ª Praça",
+                    title=f"Radar · 1ª vs 2ª Praça{' (lance atual)' if has_atual_praca else ''}",
                     showlegend=True,
                     legend=dict(font=dict(family="Share Tech Mono", size=9, color="#7a9ab8")),
                     height=340,
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-        # ── Gráfico de barras comparativo ──
+        # ── Gráfico de barras — usa lance_op (atual ou mínimo) ──
         if len(res) >= 1:
             fig2 = go.Figure()
-            p_names = list(res.keys())
             bar_colors = ["#2a7aaa", "#22aa55"]
-            metricas_bar = [("Custo Total", "custo"), ("Lucro Líquido", "lucro"),
-                            ("VGV Mercado", None)]
-            x_labels = []
-            for pname in p_names:
-                for ml, _ in metricas_bar:
-                    x_labels.append(f"{ml}\n{pname}")
-
-            fig2 = go.Figure()
             for i, (pname, rdata) in enumerate(res.items()):
+                x_vals = ["Lance", "Custo Total", "Lucro Líq."]
+                y_vals = [rdata["lance_op"], rdata["custo"], rdata["lucro"]]
                 fig2.add_trace(go.Bar(
                     name=pname,
-                    x=["Lance Mínimo", "Custo Total", "Lucro Líquido"],
-                    y=[rdata["lance"], rdata["custo"], rdata["lucro"]],
+                    x=x_vals, y=y_vals,
                     marker=dict(color=bar_colors[i],
                                 line=dict(color=bar_colors[i], width=1)),
-                    text=[fmt(v) for v in [rdata["lance"], rdata["custo"], rdata["lucro"]]],
+                    text=[fmt(v) for v in y_vals],
                     textposition="outside",
                     textfont=dict(family="Share Tech Mono", size=9, color="#a8c8e8"),
                 ))
-
             fig2.add_hline(y=vgv_val, line_dash="dot", line_color="#ffaa33", line_width=1,
-                           annotation_text=" VGV Mercado", annotation_font=dict(color="#ffaa33", size=9))
+                           annotation_text=" VGV Mercado",
+                           annotation_font=dict(color="#ffaa33", size=9))
+            suffix = " (Lance Atual)" if has_atual_praca else " (Lance Mínimo)"
             fig2.update_layout(
                 **PLOTLY_LAYOUT,
-                title="Lance · Custo · Lucro por Praça",
+                title="Lance · Custo · Lucro por Praça" + suffix,
                 barmode="group",
                 yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f",
                 showlegend=True,
@@ -1082,9 +1115,9 @@ with tab2:
     with ca:
         fig = go.Figure()
         if tem_lance_atual:
-            cats   = ["Lance Mínimo", "Lance Atual", "Custo (mín.)", "Custo (atual)", "Valor Mercado"]
-            values = [lance_ref, lance_op, custos_ref["total"], custos_op["total"], vgv_val]
-            bar_colors = ["#1a4a7a","#2a8acc","#1e5a88","#2a7aaa",
+            cats   = ["Lance Mínimo", "Custo (mín.)", "Lance Atual", "Custo (atual)", "Valor Mercado"]
+            values = [lance_ref, custos_ref["total"], lance_op, custos_op["total"], vgv_val]
+            bar_colors = ["#1a4a7a","#1e5a88","#2a8acc","#2a7aaa",
                           "#00cc88" if vgv_val > custos_op["total"] else "#ff4455"]
         else:
             cats   = ["Lance Mínimo", "Custo Total\n(c/ taxas)", "Valor Mercado"]
