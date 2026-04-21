@@ -654,6 +654,8 @@ if "pdf_texto" not in st.session_state:
     st.session_state.pdf_texto = ""
 if "pdf_nome" not in st.session_state:
     st.session_state.pdf_nome = ""
+if "comps_cache" not in st.session_state:
+    st.session_state.comps_cache = {}
 
 # ─────────────────────────────────────────────
 #  SIDEBAR
@@ -739,6 +741,11 @@ with st.sidebar:
     lance_2      = st.number_input("Lance Mínimo 2ª Praça (R$)", min_value=0.0,
                                    value=float(val("lance_2praca", 0.0)), step=1_000.0)
     data_2       = st.text_input("Data 2ª Praça", value=val("data_2praca", ""))
+
+    st.markdown('<div class="section-header">// LANCE ATUAL (PLATAFORMA)</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-family:Share Tech Mono,monospace;font-size:0.62rem;color:#4a6a8a;margin-bottom:0.5rem">Valor em disputa agora na plataforma.<br>Deixe zero se não iniciou.</div>', unsafe_allow_html=True)
+    lance_atual  = st.number_input("Lance Atual (R$)", min_value=0.0, value=0.0, step=1_000.0,
+                                   help="Valor corrente na plataforma — pode estar acima do lance mínimo")
 
     # ── CUSTOS ──
     st.markdown('<div class="section-header">// CUSTOS & TAXAS</div>', unsafe_allow_html=True)
@@ -839,21 +846,37 @@ if deb_vendedora > 0:
 #  ENGINE DE CÁLCULO
 # ─────────────────────────────────────────────
 
-# Usar lance mais relevante para KPIs (1ª praça ou 2ª se 1ª = 0)
+# ── Lance de referência: atual > praças > zero ──
+# lance_ref = base do cálculo (lance mínimo da praça relevante)
+# lance_op  = lance operacional (atual se informado, senão lance_ref)
 lance_ref = lance_1 if lance_1 > 0 else lance_2
+lance_op  = lance_atual if lance_atual > 0 else lance_ref
+tem_lance_atual = lance_atual > 0 and lance_atual != lance_ref
 
-comps        = get_comps(regiao)
+# Cache comparáveis por região para garantir consistência entre site e PDF
+if regiao not in st.session_state.comps_cache:
+    st.session_state.comps_cache[regiao] = get_comps(regiao)
+comps        = st.session_state.comps_cache[regiao]
 precos_m2    = [c["R$/m²"] for c in comps]
 m2_medio     = np.mean(precos_m2)
 area_adj     = area_util * (1 - margem_ad / 100)
 vgv_val      = vgv(area_adj, m2_medio)
 
+# Análise BASE (lance mínimo da praça)
 custos_ref   = custo_total(lance_ref, comissao_pct, itbi_pct, outros_custos + outros_deb)
 ll_ref, igc_ref, gb_ref = lucro_liq(vgv_val, custos_ref["total"])
 roi_ref      = ll_ref / custos_ref["total"] * 100 if custos_ref["total"] > 0 else 0
 ms_ref       = (1 - custos_ref["total"] / vgv_val) * 100 if vgv_val > 0 else 0
 tir_12       = calcular_tir(custos_ref["total"], vgv_val, 12)
 tir_18       = calcular_tir(custos_ref["total"], vgv_val, 18)
+
+# Análise ATUAL (lance em disputa na plataforma)
+custos_op    = custo_total(lance_op, comissao_pct, itbi_pct, outros_custos + outros_deb)
+ll_op, igc_op, gb_op = lucro_liq(vgv_val, custos_op["total"])
+roi_op       = ll_op / custos_op["total"] * 100 if custos_op["total"] > 0 else 0
+ms_op        = (1 - custos_op["total"] / vgv_val) * 100 if vgv_val > 0 else 0
+tir_12_op    = calcular_tir(custos_op["total"], vgv_val, 12)
+tir_18_op    = calcular_tir(custos_op["total"], vgv_val, 18)
 
 analise_p    = analise_pracas(lance_1, lance_2, avaliacao, vgv_val,
                                comissao_pct, itbi_pct, outros_custos + outros_deb)
@@ -868,20 +891,31 @@ def kpi(label, value, sub="", color="#2a7aaa"):
         <div class='kpi-value' style='color:{color}'>{value}</div>
         <div class='kpi-sub'>{sub}</div></div>"""
 
-lc = "#00cc88" if ll_ref >= 0 else "#ff4455"
-rc = "#00cc88" if roi_ref >= 20 else "#ffaa33" if roi_ref >= 10 else "#ff4455"
-mc = "#00cc88" if ms_ref >= 25 else "#ffaa33" if ms_ref >= 15 else "#ff4455"
+# KPIs usam lance_op (atual se informado, senão mínimo)
+lc = "#00cc88" if ll_op >= 0 else "#ff4455"
+rc = "#00cc88" if roi_op >= 20 else "#ffaa33" if roi_op >= 10 else "#ff4455"
+mc = "#00cc88" if ms_op >= 25 else "#ffaa33" if ms_op >= 15 else "#ff4455"
+
+# Alerta de lance atual
+if tem_lance_atual:
+    delta_pct = (lance_op - lance_ref) / lance_ref * 100 if lance_ref > 0 else 0
+    st.markdown(f"""
+    <div class='alert-orange' style='border-color:#ffaa33;color:#ffcc66'>
+        ⚡ LANCE ATUAL EM DISPUTA: <strong>{fmt(lance_op)}</strong> &nbsp;·&nbsp;
+        {delta_pct:+.1f}% acima do mínimo ({fmt(lance_ref)}) &nbsp;·&nbsp;
+        KPIs e análises calculados sobre o lance atual
+    </div>""", unsafe_allow_html=True)
 
 c1,c2,c3,c4,c5 = st.columns(5)
-with c1: st.markdown(kpi("CUSTO TOTAL", fmt(custos_ref["total"]),
-                          f"Lance ref: {fmt(lance_ref)}", "#4a8acc"), unsafe_allow_html=True)
+with c1: st.markdown(kpi("CUSTO TOTAL", fmt(custos_op["total"]),
+                          f"Lance op: {fmt(lance_op)}", "#4a8acc"), unsafe_allow_html=True)
 with c2: st.markdown(kpi("VALOR DE MERCADO", fmt(vgv_val),
                           f"R$/m²: {m2_medio:,.0f} · área: {area_adj:.0f}m²", "#6a9acc"), unsafe_allow_html=True)
-with c3: st.markdown(kpi("LUCRO LÍQUIDO", fmt(ll_ref),
-                          f"IGC 15%: {fmt(igc_ref)}", lc), unsafe_allow_html=True)
-with c4: st.markdown(kpi("ROI ESTIMADO", f"{roi_ref:.1f}%",
+with c3: st.markdown(kpi("LUCRO LÍQUIDO", fmt(ll_op),
+                          f"IGC 15%: {fmt(igc_op)}", lc), unsafe_allow_html=True)
+with c4: st.markdown(kpi("ROI ESTIMADO", f"{roi_op:.1f}%",
                           "Sobre custo total", rc), unsafe_allow_html=True)
-with c5: st.markdown(kpi("MARGEM DE SEGURANÇA", f"{ms_ref:.1f}%",
+with c5: st.markdown(kpi("MARGEM DE SEGURANÇA", f"{ms_op:.1f}%",
                           "Desconto vs mercado", mc), unsafe_allow_html=True)
 
 st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
@@ -1043,19 +1077,26 @@ with tab1:
 #  TAB 2 · COMPARATIVO
 # ────────────────────────────────────
 with tab2:
+    # Gráfico principal — inclui lance_op se diferente
     ca, cb = st.columns([3, 2])
     with ca:
         fig = go.Figure()
-        cats   = ["Lance Ref.", "Custo Total\n(c/ taxas)", "Valor Mercado"]
-        values = [lance_ref, custos_ref["total"], vgv_val]
-        colors = ["#1e5a88", "#2a7aaa", "#00cc88" if vgv_val > custos_ref["total"] else "#ff4455"]
+        if tem_lance_atual:
+            cats   = ["Lance Mínimo", "Lance Atual", "Custo (mín.)", "Custo (atual)", "Valor Mercado"]
+            values = [lance_ref, lance_op, custos_ref["total"], custos_op["total"], vgv_val]
+            bar_colors = ["#1a4a7a","#2a8acc","#1e5a88","#2a7aaa",
+                          "#00cc88" if vgv_val > custos_op["total"] else "#ff4455"]
+        else:
+            cats   = ["Lance Mínimo", "Custo Total\n(c/ taxas)", "Valor Mercado"]
+            values = [lance_ref, custos_ref["total"], vgv_val]
+            bar_colors = ["#1e5a88", "#2a7aaa", "#00cc88" if vgv_val > custos_ref["total"] else "#ff4455"]
         fig.add_trace(go.Bar(
-            x=cats, y=values, marker=dict(color=colors),
+            x=cats, y=values, marker=dict(color=bar_colors),
             text=[fmt(v) for v in values], textposition="outside",
             textfont=dict(family="Share Tech Mono", size=10, color="#a8c8e8"),
         ))
-        fig.add_hline(y=custos_ref["total"], line_dash="dot", line_color="#ffaa33",
-                      line_width=1, annotation_text=" breakeven",
+        fig.add_hline(y=custos_op["total"], line_dash="dot", line_color="#ffaa33",
+                      line_width=1, annotation_text=" breakeven atual",
                       annotation_font=dict(color="#ffaa33", size=9))
         if avaliacao > 0:
             fig.add_hline(y=avaliacao, line_dash="dash", line_color="#aa55ff",
@@ -1070,15 +1111,16 @@ with tab2:
         fig2 = go.Figure(go.Waterfall(
             orientation="v", measure=["absolute","relative","relative","relative","relative","total"],
             x=["Lance", "Comissão", "ITBI", "Escritura", "Outros", "TOTAL"],
-            y=[lance_ref, custos_ref["comissao"], custos_ref["itbi"],
-               custos_ref["escritura"], custos_ref["outros"], 0],
+            y=[lance_op, custos_op["comissao"], custos_op["itbi"],
+               custos_op["escritura"], custos_op["outros"], 0],
             connector=dict(line=dict(color="#1a2e42", width=1)),
             decreasing=dict(marker=dict(color="#ff4455")),
             increasing=dict(marker=dict(color="#2a7aaa")),
-            totals=dict(marker=dict(color="#00cc88" if vgv_val > custos_ref["total"] else "#ff4455")),
+            totals=dict(marker=dict(color="#00cc88" if vgv_val > custos_op["total"] else "#ff4455")),
             texttemplate="%{y:,.0f}", textfont=dict(family="Share Tech Mono", size=9),
         ))
-        fig2.update_layout(**PLOTLY_LAYOUT, title="Waterfall · Composição de Custos",
+        title_wf = f"Waterfall · Lance {'Atual' if tem_lance_atual else 'Mínimo'}"
+        fig2.update_layout(**PLOTLY_LAYOUT, title=title_wf,
                            yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f", height=380)
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -1090,48 +1132,73 @@ with tab3:
     with cx:
         st.markdown('<div class="section-header">// BREAKDOWN DE AQUISIÇÃO</div>',
                     unsafe_allow_html=True)
-        bd = [
-            {"Item": "Lance Inicial",        "Valor": fmt(custos_ref["lance"]),   "% Lance": f"{custos_ref['lance']/lance_ref*100:.1f}%"  if lance_ref else "—"},
-            {"Item": "Comissão Leiloeiro",    "Valor": fmt(custos_ref["comissao"]),"% Lance": f"{custos_ref['comissao']/lance_ref*100:.1f}%" if lance_ref else "—"},
-            {"Item": "ITBI",                 "Valor": fmt(custos_ref["itbi"]),    "% Lance": f"{custos_ref['itbi']/lance_ref*100:.1f}%"    if lance_ref else "—"},
-            {"Item": "Escritura / Cartório", "Valor": fmt(custos_ref["escritura"]),"% Lance": f"{custos_ref['escritura']/lance_ref*100:.1f}%" if lance_ref else "—"},
-            {"Item": "Outros",               "Valor": fmt(custos_ref["outros"]),  "% Lance": f"{custos_ref['outros']/lance_ref*100:.1f}%"  if lance_ref else "—"},
-            {"Item": "──────────────",       "Valor": "──────────",              "% Lance": "──────"},
-            {"Item": "CUSTO TOTAL",          "Valor": fmt(custos_ref["total"]),   "% Lance": f"{custos_ref['total']/lance_ref*100:.1f}%"   if lance_ref else "—"},
-        ]
+        # Mostra coluna extra se houver lance atual
+        if tem_lance_atual:
+            bd = [
+                {"Item": "Lance",            "Mínimo": fmt(custos_ref["lance"]),    "Atual": fmt(custos_op["lance"])},
+                {"Item": "Comissão",         "Mínimo": fmt(custos_ref["comissao"]), "Atual": fmt(custos_op["comissao"])},
+                {"Item": "ITBI",             "Mínimo": fmt(custos_ref["itbi"]),     "Atual": fmt(custos_op["itbi"])},
+                {"Item": "Escritura",        "Mínimo": fmt(custos_ref["escritura"]),"Atual": fmt(custos_op["escritura"])},
+                {"Item": "Outros",           "Mínimo": fmt(custos_ref["outros"]),   "Atual": fmt(custos_op["outros"])},
+                {"Item": "CUSTO TOTAL",      "Mínimo": fmt(custos_ref["total"]),    "Atual": fmt(custos_op["total"])},
+            ]
+        else:
+            bd = [
+                {"Item": "Lance Inicial",        "Valor": fmt(custos_ref["lance"]),    "% Lance": f"{custos_ref['lance']/lance_ref*100:.1f}%"    if lance_ref else "—"},
+                {"Item": "Comissão Leiloeiro",   "Valor": fmt(custos_ref["comissao"]), "% Lance": f"{custos_ref['comissao']/lance_ref*100:.1f}%" if lance_ref else "—"},
+                {"Item": "ITBI",                 "Valor": fmt(custos_ref["itbi"]),     "% Lance": f"{custos_ref['itbi']/lance_ref*100:.1f}%"     if lance_ref else "—"},
+                {"Item": "Escritura / Cartório", "Valor": fmt(custos_ref["escritura"]),"% Lance": f"{custos_ref['escritura']/lance_ref*100:.1f}%" if lance_ref else "—"},
+                {"Item": "Outros",               "Valor": fmt(custos_ref["outros"]),   "% Lance": f"{custos_ref['outros']/lance_ref*100:.1f}%"   if lance_ref else "—"},
+                {"Item": "CUSTO TOTAL",          "Valor": fmt(custos_ref["total"]),    "% Lance": f"{custos_ref['total']/lance_ref*100:.1f}%"    if lance_ref else "—"},
+            ]
         st.dataframe(pd.DataFrame(bd), hide_index=True, use_container_width=True)
 
         st.markdown('<div class="section-header">// DÉBITOS & RESPONSABILIDADES</div>',
                     unsafe_allow_html=True)
         deb_rows = [
-            {"Débito": "IPTU Atrasado",       "Valor": fmt(iptu_deb),  "Responsável": "VENDEDORA ← propter rem"},
-            {"Débito": "Condomínio Atrasado", "Valor": fmt(cond_deb),  "Responsável": "VENDEDORA ← propter rem"},
-            {"Débito": "Outros → comprador",  "Valor": fmt(outros_deb),"Responsável": "COMPRADOR → entra no custo"},
-            {"Débito": "Total vendedora",     "Valor": fmt(deb_vendedora),"Responsável": "Exigir quitação"},
+            {"Débito": "IPTU Atrasado",       "Valor": fmt(iptu_deb),      "Responsável": "VENDEDORA ← propter rem"},
+            {"Débito": "Condomínio Atrasado", "Valor": fmt(cond_deb),      "Responsável": "VENDEDORA ← propter rem"},
+            {"Débito": "Outros → comprador",  "Valor": fmt(outros_deb),    "Responsável": "COMPRADOR → entra no custo"},
+            {"Débito": "Total vendedora",     "Valor": fmt(deb_vendedora), "Responsável": "Exigir quitação"},
         ]
         st.dataframe(pd.DataFrame(deb_rows), hide_index=True, use_container_width=True)
 
     with cy:
         st.markdown('<div class="section-header">// P&L PROJETADO</div>', unsafe_allow_html=True)
-        pl = [
-            {"Item": "VGV (Valor de Mercado)",   "Valor": fmt(vgv_val)},
-            {"Item": "(-) Custo Total",          "Valor": fmt(-custos_ref["total"])},
-            {"Item": "= Ganho Bruto",            "Valor": fmt(gb_ref)},
-            {"Item": "(-) IGC 15%",              "Valor": fmt(-igc_ref)},
-            {"Item": "= LUCRO LÍQUIDO",          "Valor": fmt(ll_ref)},
-        ]
+        if tem_lance_atual:
+            pl = [
+                {"Item": "VGV (Valor de Mercado)",    "Lance Mínimo": fmt(vgv_val),           "Lance Atual": fmt(vgv_val)},
+                {"Item": "(-) Custo Total",           "Lance Mínimo": fmt(-custos_ref["total"]),"Lance Atual": fmt(-custos_op["total"])},
+                {"Item": "= Ganho Bruto",             "Lance Mínimo": fmt(gb_ref),            "Lance Atual": fmt(gb_op)},
+                {"Item": "(-) IGC 15%",               "Lance Mínimo": fmt(-igc_ref),          "Lance Atual": fmt(-igc_op)},
+                {"Item": "= LUCRO LÍQUIDO",           "Lance Mínimo": fmt(ll_ref),            "Lance Atual": fmt(ll_op)},
+                {"Item": "ROI",                       "Lance Mínimo": f"{roi_ref:.1f}%",      "Lance Atual": f"{roi_op:.1f}%"},
+                {"Item": "Margem de Segurança",       "Lance Mínimo": f"{ms_ref:.1f}%",       "Lance Atual": f"{ms_op:.1f}%"},
+            ]
+        else:
+            pl = [
+                {"Item": "VGV (Valor de Mercado)",   "Valor": fmt(vgv_val)},
+                {"Item": "(-) Custo Total",          "Valor": fmt(-custos_ref["total"])},
+                {"Item": "= Ganho Bruto",            "Valor": fmt(gb_ref)},
+                {"Item": "(-) IGC 15%",              "Valor": fmt(-igc_ref)},
+                {"Item": "= LUCRO LÍQUIDO",          "Valor": fmt(ll_ref)},
+                {"Item": "ROI",                      "Valor": f"{roi_ref:.1f}%"},
+                {"Item": "Margem de Segurança",      "Valor": f"{ms_ref:.1f}%"},
+            ]
         st.dataframe(pd.DataFrame(pl), hide_index=True, use_container_width=True)
 
         if avaliacao > 0:
             st.markdown('<div class="section-header">// POSICIONAMENTO vs AVALIAÇÃO</div>',
                         unsafe_allow_html=True)
-            desc_1 = (1 - lance_1/avaliacao)*100 if lance_1 and avaliacao else 0
-            desc_2 = (1 - lance_2/avaliacao)*100 if lance_2 and avaliacao else 0
+            desc_1  = (1 - lance_1/avaliacao)*100   if lance_1 and avaliacao else 0
+            desc_2  = (1 - lance_2/avaliacao)*100   if lance_2 and avaliacao else 0
+            desc_op = (1 - lance_op/avaliacao)*100  if lance_op and avaliacao else 0
             pos_rows = [
-                {"Item": "Valor de Avaliação Oficial",  "Valor": fmt(avaliacao)},
-                {"Item": "Desconto 1ª Praça vs. Aval.", "Valor": f"{desc_1:.1f}%"},
-                {"Item": "Desconto 2ª Praça vs. Aval.", "Valor": f"{desc_2:.1f}%"},
-                {"Item": "Desconto Mercado vs. Aval.",  "Valor": f"{(1-vgv_val/avaliacao)*100:.1f}%" if avaliacao else "—"},
+                {"Item": "Valor de Avaliação Oficial",   "Valor": fmt(avaliacao)},
+                {"Item": "Desconto 1ª Praça vs. Aval.",  "Valor": f"{desc_1:.1f}%"},
+                {"Item": "Desconto 2ª Praça vs. Aval.",  "Valor": f"{desc_2:.1f}%"},
+                {"Item": "Desconto Lance Atual vs. Aval.","Valor": f"{desc_op:.1f}%" if tem_lance_atual else "—"},
+                {"Item": "Desconto Mercado vs. Aval.",   "Valor": f"{(1-vgv_val/avaliacao)*100:.1f}%"},
             ]
             st.dataframe(pd.DataFrame(pos_rows), hide_index=True, use_container_width=True)
 
@@ -1142,33 +1209,58 @@ with tab4:
     cp, cq = st.columns([2, 3])
     with cp:
         st.markdown('<div class="section-header">// TIR ANUALIZADA</div>', unsafe_allow_html=True)
-        tir_rows = []
-        for meses, tir in [(12, tir_12), (18, tir_18)]:
-            tir_rows.append({
-                "Horizonte": f"{meses} meses",
-                "TIR Anual": f"{tir*100:.1f}%" if tir else "N/C",
-                "Rating": "✅ Excelente" if tir and tir > 0.20
-                           else "⚡ Bom" if tir and tir > 0.12
-                           else "⚠ Atenção" if tir and tir > 0
-                           else "❌ Negativo",
-            })
+        def tir_rating(t):
+            return "✅ Excelente" if t and t > 0.20 else "⚡ Bom" if t and t > 0.12 else "⚠ Atenção" if t and t > 0 else "❌ Negativo"
+
+        if tem_lance_atual:
+            tir_rows = []
+            for meses, t_min, t_op in [(12, tir_12, tir_12_op), (18, tir_18, tir_18_op)]:
+                tir_rows.append({
+                    "Horizonte":    f"{meses} meses",
+                    "TIR (mínimo)": f"{t_min*100:.1f}%" if t_min else "N/C",
+                    "TIR (atual)":  f"{t_op*100:.1f}%"  if t_op  else "N/C",
+                    "Rating atual": tir_rating(t_op),
+                })
+        else:
+            tir_rows = []
+            for meses, tir in [(12, tir_12), (18, tir_18)]:
+                tir_rows.append({
+                    "Horizonte": f"{meses} meses",
+                    "TIR Anual": f"{tir*100:.1f}%" if tir else "N/C",
+                    "Rating":    tir_rating(tir),
+                })
         st.dataframe(pd.DataFrame(tir_rows), hide_index=True, use_container_width=True)
 
         st.markdown('<div class="section-header">// INDICADORES</div>', unsafe_allow_html=True)
-        inds = [
-            {"Indicador": "Múltiplo VGV/Custo",     "Valor": f"{vgv_val/custos_ref['total']:.2f}x" if custos_ref["total"] else "—"},
-            {"Indicador": "R$/m² Adquirido",         "Valor": f"R$ {custos_ref['total']/area_adj:,.0f}" if area_adj else "—"},
-            {"Indicador": "R$/m² Mercado",           "Valor": f"R$ {m2_medio:,.0f}"},
-            {"Indicador": "Spread m²",               "Valor": f"R$ {m2_medio - custos_ref['total']/area_adj:,.0f}" if area_adj else "—"},
-            {"Indicador": "Lance / Avaliação",       "Valor": f"{lance_ref/avaliacao*100:.1f}%" if avaliacao and lance_ref else "—"},
-        ]
+        if tem_lance_atual:
+            inds = [
+                {"Indicador": "Múltiplo VGV/Custo",  "Mínimo": f"{vgv_val/custos_ref['total']:.2f}x" if custos_ref["total"] else "—",
+                                                      "Atual":  f"{vgv_val/custos_op['total']:.2f}x"  if custos_op["total"]  else "—"},
+                {"Indicador": "R$/m² Adquirido",     "Mínimo": f"R$ {custos_ref['total']/area_adj:,.0f}" if area_adj else "—",
+                                                      "Atual":  f"R$ {custos_op['total']/area_adj:,.0f}"  if area_adj else "—"},
+                {"Indicador": "R$/m² Mercado",       "Mínimo": f"R$ {m2_medio:,.0f}", "Atual": f"R$ {m2_medio:,.0f}"},
+                {"Indicador": "Spread m²",           "Mínimo": f"R$ {m2_medio - custos_ref['total']/area_adj:,.0f}" if area_adj else "—",
+                                                      "Atual":  f"R$ {m2_medio - custos_op['total']/area_adj:,.0f}"  if area_adj else "—"},
+                {"Indicador": "ROI",                 "Mínimo": f"{roi_ref:.1f}%",  "Atual": f"{roi_op:.1f}%"},
+                {"Indicador": "Margem Segurança",    "Mínimo": f"{ms_ref:.1f}%",   "Atual": f"{ms_op:.1f}%"},
+            ]
+        else:
+            inds = [
+                {"Indicador": "Múltiplo VGV/Custo",  "Valor": f"{vgv_val/custos_ref['total']:.2f}x" if custos_ref["total"] else "—"},
+                {"Indicador": "R$/m² Adquirido",     "Valor": f"R$ {custos_ref['total']/area_adj:,.0f}" if area_adj else "—"},
+                {"Indicador": "R$/m² Mercado",       "Valor": f"R$ {m2_medio:,.0f}"},
+                {"Indicador": "Spread m²",           "Valor": f"R$ {m2_medio - custos_ref['total']/area_adj:,.0f}" if area_adj else "—"},
+                {"Indicador": "Lance / Avaliação",   "Valor": f"{lance_ref/avaliacao*100:.1f}%" if avaliacao and lance_ref else "—"},
+            ]
         st.dataframe(pd.DataFrame(inds), hide_index=True, use_container_width=True)
 
     with cq:
+        # Sensibilidade baseada no lance_op; marca também lance mínimo se diferente
+        base_sens = lance_op if tem_lance_atual else lance_ref
         descontos  = np.linspace(-0.20, 0.35, 70)
         lucros_var = []
         for d_pct in descontos:
-            l_v = lance_ref * (1 - d_pct)
+            l_v = base_sens * (1 - d_pct)
             c_v = custo_total(l_v, comissao_pct, itbi_pct, outros_custos + outros_deb)
             ll_v, _, _ = lucro_liq(vgv_val, c_v["total"])
             lucros_var.append(ll_v)
@@ -1189,10 +1281,17 @@ with tab4:
             line=dict(color="#ff4455", width=2), name="Prejuízo",
         ))
         fig3.add_vline(x=0, line_dash="dot", line_color="#ffaa33", line_width=1,
-                       annotation_text=" lance atual", annotation_font=dict(color="#ffaa33", size=9))
+                       annotation_text=f" lance {'atual' if tem_lance_atual else 'mínimo'}",
+                       annotation_font=dict(color="#ffaa33", size=9))
+        if tem_lance_atual and lance_ref > 0:
+            # marca onde está o lance mínimo no eixo de variação
+            pos_min = (base_sens - lance_ref) / base_sens * 100
+            fig3.add_vline(x=-pos_min, line_dash="dot", line_color="#4a9acc", line_width=1,
+                           annotation_text=" lance mínimo",
+                           annotation_font=dict(color="#4a9acc", size=9))
         fig3.update_layout(
             **PLOTLY_LAYOUT,
-            title="Sensibilidade · Lucro Líquido vs. Variação do Lance",
+            title=f"Sensibilidade · Lucro vs. Variação sobre Lance {'Atual' if tem_lance_atual else 'Mínimo'}",
             xaxis_title="Variação no Lance (%)",
             yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f",
             showlegend=False, height=340,
@@ -1225,10 +1324,19 @@ with tab5:
         ))
         if area_util > 0 and lance_ref > 0:
             fig4.add_trace(go.Scatter(
-                x=[area_util], y=[lance_ref], mode="markers+text", text=["LEILÃO"],
-                textposition="top center",
-                marker=dict(size=18, color="#ffaa33", symbol="diamond",
+                x=[area_util], y=[lance_ref], mode="markers+text",
+                text=["Mínimo"], textposition="top center",
+                marker=dict(size=16, color="#4a9acc", symbol="diamond",
+                            line=dict(color="#88ccff", width=2)),
+                name="Lance Mínimo",
+            ))
+        if tem_lance_atual and area_util > 0:
+            fig4.add_trace(go.Scatter(
+                x=[area_util], y=[lance_op], mode="markers+text",
+                text=["ATUAL"], textposition="bottom center",
+                marker=dict(size=18, color="#ffaa33", symbol="star",
                             line=dict(color="#ffcc55", width=2)),
+                name="Lance Atual",
             ))
         fig4.update_layout(**PLOTLY_LAYOUT, title="Dispersão · Área vs. Preço",
                            xaxis_title="Área (m²)",
@@ -1237,7 +1345,7 @@ with tab5:
         st.plotly_chart(fig4, use_container_width=True)
 
     with cs:
-        pct_mercado = (lance_ref / vgv_val * 100) if vgv_val > 0 and lance_ref > 0 else 50
+        pct_mercado = (lance_op / vgv_val * 100) if vgv_val > 0 and lance_op > 0 else 50
         fig5 = go.Figure(go.Indicator(
             mode="gauge+number+delta",
             value=pct_mercado,
@@ -1257,10 +1365,10 @@ with tab5:
                 ],
                 threshold=dict(line=dict(color="#00cc88", width=2), value=80),
             ),
-            title=dict(text="Lance / Valor de Mercado",
-                       font=dict(family="Share Tech Mono", color="#4a6a8a", size=10)),
         ))
-        fig5.update_layout(**PLOTLY_LAYOUT, height=300)
+        fig5.update_layout(**PLOTLY_LAYOUT, height=300,
+            title=dict(text="Lance / Valor de Mercado",
+                       font=dict(family="Share Tech Mono", color="#4a6a8a", size=10)))
         st.plotly_chart(fig5, use_container_width=True)
 
 # ─────────────────────────────────────────────
