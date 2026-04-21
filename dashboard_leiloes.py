@@ -250,177 +250,261 @@ def extrair_texto_pdf(arquivo_bytes: bytes) -> str:
 
 def parse_edital(texto: str) -> dict:
     """
-    Parser inteligente de editais de leilão.
-    Tenta extrair todos os campos relevantes.
+    Parser inteligente v2 — suporta BCO Leilões, Sold, Superbid,
+    Lance&Lance, editais judiciais e extrajudiciais.
     """
     dados = {
         "endereco": "", "area_util": 0.0, "area_total": 0.0,
         "avaliacao": 0.0, "lance_1praca": 0.0, "lance_2praca": 0.0,
-        "data_1praca": "", "data_2praca": "",
+        "data_leilao": "", "data_1praca": "", "data_2praca": "",
         "comissao_pct": 5.0, "itbi_pct": 3.0,
         "iptu_debito": 0.0, "cond_debito": 0.0,
         "matricula": "", "comarca": "", "vara": "",
         "ad_corpus": False, "venda_condicionada": False,
-        "numero_processo": "",
-        "_extraidos": [],  # campos que foram extraídos automaticamente
+        "numero_processo": "", "leiloeira": "", "plataforma": "",
+        "lance_na_plataforma": False,  # flag BCO/Sold: lance só no site
+        "_extraidos": [],
+        "_avisos": [],  # avisos para o usuário
     }
 
-    # ── Endereço ──
-    end_patterns = [
-        r'(?:imóvel|bem|endereço|situado)[:\s]+([^\n,]{10,80}(?:,\s*[\w\s]+)?)',
-        r'(?:rua|av\.|avenida|alameda|travessa|estrada)\s+[^\n]{5,80}',
-        r'(?:localizado|localizada)\s+(?:no|na|em)\s+([^\n]{10,80})',
-    ]
-    for p in end_patterns:
-        m = re.search(p, texto, re.IGNORECASE)
-        if m:
-            dados["endereco"] = m.group(0)[:120].strip()
-            dados["_extraidos"].append("endereco")
-            break
+    # ── Detectar leiloeira / plataforma ──
+    if re.search(r'bcoleil[oõ]es', texto, re.IGNORECASE):
+        dados["plataforma"] = "bcoleiloes.com.br"
+        dados["_extraidos"].append("plataforma")
+    if re.search(r'sold\s*leil', texto, re.IGNORECASE):
+        dados["plataforma"] = "sold.com.br"
+        dados["_extraidos"].append("plataforma")
+    if re.search(r'superbid', texto, re.IGNORECASE):
+        dados["plataforma"] = "superbid.net"
+        dados["_extraidos"].append("plataforma")
 
-    # ── Área útil ──
-    area_patterns = [
-        r'área\s+(?:útil|privativa)[:\s]*([\d.,]+)\s*m',
-        r'(?:área\s+)?(?:útil|privativa)[:\s]*([\d.,]+)\s*m[²2]',
-        r'([\d.,]+)\s*m[²2]\s*(?:de\s+)?(?:área\s+)?(?:útil|privativa)',
+    # Detectar padrão "lance será disponibilizado na plataforma" (BCO Leilões)
+    if re.search(r'lance\s+(?:inicial\s+)?(?:do\s+imóvel\s+)?(?:deste\s+leilão\s+)?será\s+(?:aquele\s+)?(?:estipulado|disponibilizado)',
+                 texto, re.IGNORECASE):
+        dados["lance_na_plataforma"] = True
+        dados["_avisos"].append(
+            "⚠ LANCE INICIAL não consta no edital — consulte a plataforma "
+            + (dados["plataforma"] or "do leiloeiro") + " e insira manualmente."
+        )
+
+    # ── Leiloeira ──
+    lei_p = r'leiloeira?\s+oficial[:\s]+([^\n,\.]{5,60})'
+    m = re.search(lei_p, texto, re.IGNORECASE)
+    if m:
+        dados["leiloeira"] = m.group(1).strip()
+        dados["_extraidos"].append("leiloeira")
+
+    # ── Endereço — múltiplas estratégias ──
+    # Estratégia 1: padrão "LOCALIZAÇÃO: ..."
+    m = re.search(r'LOCALIZA[ÇC][ÃA]O[:\s]+([^\n]{10,120})', texto, re.IGNORECASE)
+    if m:
+        dados["endereco"] = m.group(1).strip()
+        dados["_extraidos"].append("endereco")
+    else:
+        # Estratégia 2: linha com rua/avenida + número
+        m = re.search(
+            r'(?:Rua|Av\.?|Avenida|Alameda|Travessa|Estrada|Al\.)\s+[^\n,]{5,60},?\s*n[°º]?\s*\d+[^\n]{0,60}',
+            texto, re.IGNORECASE)
+        if m:
+            dados["endereco"] = m.group(0).strip()[:150]
+            dados["_extraidos"].append("endereco")
+        else:
+            # Estratégia 3: após LOTE / imóvel descrito
+            m = re.search(r'LOTE[:\s]+[^\n]{10,150}', texto, re.IGNORECASE)
+            if m:
+                dados["endereco"] = m.group(0).strip()[:150]
+                dados["_extraidos"].append("endereco")
+
+    # ── Área útil — prioridade para "área útil de X m²" ──
+    area_util_patterns = [
+        r'área\s+útil\s+de\s+([\d.,]+)\s*m[²2]?',
+        r'área\s+(?:útil|privativa)[:\s]*([\d.,]+)\s*m[²2]?',
+        r'([\d.,]+)\s*m[²2]\s*,?\s*(?:de\s+)?área\s+(?:útil|privativa)',
     ]
-    for p in area_patterns:
+    for p in area_util_patterns:
         m = re.search(p, texto, re.IGNORECASE)
         if m:
-            dados["area_util"] = limpar_valor(m.group(1))
-            dados["_extraidos"].append("area_util")
-            break
+            v = limpar_valor(m.group(1))
+            if v > 0:
+                dados["area_util"] = v
+                dados["_extraidos"].append("area_util")
+                break
 
     # ── Área total ──
-    area_tot_patterns = [
-        r'área\s+total[:\s]*([\d.,]+)\s*m',
-        r'([\d.,]+)\s*m[²2]\s*(?:de\s+)?área\s+total',
-        r'área\s+construída[:\s]*([\d.,]+)\s*m',
+    area_total_patterns = [
+        r'área\s+total\s+de\s+([\d.,]+)\s*m[²2]?',
+        r'área\s+total[:\s]*([\d.,]+)\s*m[²2]?',
+        r'([\d.,]+)\s*m[²2]\s*,?\s*(?:de\s+)?área\s+total',
     ]
-    for p in area_tot_patterns:
+    for p in area_total_patterns:
         m = re.search(p, texto, re.IGNORECASE)
         if m:
-            dados["area_total"] = limpar_valor(m.group(1))
-            dados["_extraidos"].append("area_total")
-            break
+            v = limpar_valor(m.group(1))
+            if v > 0:
+                dados["area_total"] = v
+                dados["_extraidos"].append("area_total")
+                break
 
     # ── Valor de avaliação ──
     aval_patterns = [
-        r'(?:valor\s+de\s+)?avalia[çc][aã]o[:\s]*R?\$?\s*([\d.,]+)',
-        r'avaliado[:\s]+(?:em\s+)?R?\$?\s*([\d.,]+)',
+        r'valor\s+(?:de\s+)?avalia[çc][ãa]o[:\s]*R?\$?\s*([\d.,]+)',
+        r'avalia[çc][ãa]o[:\s]*R?\$?\s*([\d.,]+)',
+        r'avaliado\s+(?:em\s+)?R?\$?\s*([\d.,]+)',
         r'valor\s+venal[:\s]*R?\$?\s*([\d.,]+)',
+        r'pre[çc]o\s+de\s+avalia[çc][ãa]o[:\s]*R?\$?\s*([\d.,]+)',
     ]
     for p in aval_patterns:
         m = re.search(p, texto, re.IGNORECASE)
         if m:
-            dados["avaliacao"] = limpar_valor(m.group(1))
-            dados["_extraidos"].append("avaliacao")
-            break
+            v = limpar_valor(m.group(1))
+            if v > 1000:
+                dados["avaliacao"] = v
+                dados["_extraidos"].append("avaliacao")
+                break
 
-    # ── 1ª Praça ──
-    p1_patterns = [
-        r'1[aª°]\s*pra[çc]a[:\s]*(?:lance\s+m[íi]nimo[:\s]*)?R?\$?\s*([\d.,]+)',
-        r'primeira\s+pra[çc]a[:\s]*R?\$?\s*([\d.,]+)',
-        r'lance\s+inicial[:\s]*R?\$?\s*([\d.,]+)',
-        r'pra[çc]a\s+1[:\s]*R?\$?\s*([\d.,]+)',
+    # ── Lances (só tenta se o valor NÃO está apenas na plataforma) ──
+    if not dados["lance_na_plataforma"]:
+        p1_patterns = [
+            r'1[aª°]\s*pra[çc]a[:\s]*(?:lance\s+m[íi]nimo[:\s]*)?R?\$?\s*([\d.,]+)',
+            r'primeira\s+pra[çc]a[:\s]*R?\$?\s*([\d.,]+)',
+            r'lance\s+(?:m[íi]nimo\s+)?(?:inicial\s+)?[:\s]*R?\$?\s*([\d.,]+)',
+            r'lance\s+inicial\s+de\s+R?\$?\s*([\d.,]+)',
+            r'valor\s+m[íi]nimo[:\s]*R?\$?\s*([\d.,]+)',
+        ]
+        for p in p1_patterns:
+            m = re.search(p, texto, re.IGNORECASE)
+            if m:
+                v = limpar_valor(m.group(1))
+                if v > 1000:
+                    dados["lance_1praca"] = v
+                    dados["_extraidos"].append("lance_1praca")
+                    break
+
+        p2_patterns = [
+            r'2[aª°]\s*pra[çc]a[:\s]*(?:lance\s+m[íi]nimo[:\s]*)?R?\$?\s*([\d.,]+)',
+            r'segunda\s+pra[çc]a[:\s]*R?\$?\s*([\d.,]+)',
+        ]
+        for p in p2_patterns:
+            m = re.search(p, texto, re.IGNORECASE)
+            if m:
+                v = limpar_valor(m.group(1))
+                if v > 1000:
+                    dados["lance_2praca"] = v
+                    dados["_extraidos"].append("lance_2praca")
+                    break
+
+    # ── Data do leilão ──
+    data_leilao_p = [
+        r'encerrando[- ]se\s+(?:no\s+dia\s+)?([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})',
+        r'dia\s+([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})\s+às\s+\d{1,2}\s*horas',
+        r'realiza[rç][ãa]o[:\s]+(?:dia\s+)?([\d]{1,2}[\/\-][\d]{1,2}[\/\-][\d]{2,4})',
     ]
-    for p in p1_patterns:
+    for p in data_leilao_p:
         m = re.search(p, texto, re.IGNORECASE)
         if m:
-            dados["lance_1praca"] = limpar_valor(m.group(1))
-            dados["_extraidos"].append("lance_1praca")
+            dados["data_leilao"] = m.group(1)
+            dados["data_1praca"] = m.group(1)
+            dados["_extraidos"].append("data_leilao")
             break
 
-    # ── 2ª Praça ──
-    p2_patterns = [
-        r'2[aª°]\s*pra[çc]a[:\s]*(?:lance\s+m[íi]nimo[:\s]*)?R?\$?\s*([\d.,]+)',
-        r'segunda\s+pra[çc]a[:\s]*R?\$?\s*([\d.,]+)',
-        r'pra[çc]a\s+2[:\s]*R?\$?\s*([\d.,]+)',
+    # ── Matrícula ──
+    mat_patterns = [
+        r'[Mm]atrícula\s+n[°º.]?\s*([\d.]+)',
+        r'[Mm]atrícula\s+nº\s*([\d.]+)',
+        r'matr[íi]cula\s*([\d.]+)',
     ]
-    for p in p2_patterns:
+    for p in mat_patterns:
         m = re.search(p, texto, re.IGNORECASE)
         if m:
-            dados["lance_2praca"] = limpar_valor(m.group(1))
-            dados["_extraidos"].append("lance_2praca")
+            dados["matricula"] = m.group(1).strip()
+            dados["_extraidos"].append("matricula")
             break
 
-    # ── Datas das praças ──
-    data_pattern = r'\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{1,2}\s+de\s+\w+\s+de\s+\d{4}'
-    datas = re.findall(data_pattern, texto)
-    if len(datas) >= 1:
-        dados["data_1praca"] = datas[0]
-        dados["_extraidos"].append("data_1praca")
-    if len(datas) >= 2:
-        dados["data_2praca"] = datas[1]
-        dados["_extraidos"].append("data_2praca")
+    # ── Cartório / Comarca ──
+    cart_p = r'(\d+[°º]?\s*Cart[oó]rio\s+de\s+Registro\s+de\s+Im[oó]veis[^\n,\.]{0,40})'
+    m = re.search(cart_p, texto, re.IGNORECASE)
+    if m:
+        dados["comarca"] = m.group(1).strip()
+        dados["_extraidos"].append("comarca")
 
-    # ── IPTU ──
+    # Foro
+    foro_p = r'[Ff]oro\s+(?:[Cc]entral\s+)?(?:da\s+[Cc]idade\s+de\s+)?([\w\s\/]+?)(?:\n|,|\.)'
+    m = re.search(foro_p, texto)
+    if m:
+        dados["vara"] = "Foro: " + m.group(1).strip()[:60]
+        dados["_extraidos"].append("vara")
+
+    # ── Processo ──
+    proc_p = r'[Pp]rocesso\s+(?:n[°º.]?\s*)?([\d.\-\/]+\-[\d.\/]+)'
+    m = re.search(proc_p, texto)
+    if m:
+        dados["numero_processo"] = m.group(1)
+        dados["_extraidos"].append("numero_processo")
+
+    # ── IPTU / Condomínio ──
+    # Verificar se há débitos com valores concretos
     iptu_p = [
-        r'IPTU[s\s]*(?:atrasado|vencido|devidos?)[:\s]*R?\$?\s*([\d.,]+)',
+        r'IPTU[^\n]{0,30}R?\$?\s*([\d.,]+)',
         r'd[ée]bito[s]?\s+(?:de\s+)?IPTU[:\s]*R?\$?\s*([\d.,]+)',
-        r'IPTU[:\s]+R?\$?\s*([\d.,]+)',
     ]
     for p in iptu_p:
         m = re.search(p, texto, re.IGNORECASE)
         if m:
-            dados["iptu_debito"] = limpar_valor(m.group(1))
-            dados["_extraidos"].append("iptu_debito")
-            break
+            v = limpar_valor(m.group(1))
+            if 100 < v < 500_000:  # filtro sanidade
+                dados["iptu_debito"] = v
+                dados["_extraidos"].append("iptu_debito")
+                break
 
-    # ── Condomínio ──
     cond_p = [
-        r'condom[íi]nio[s\s]*(?:atrasado|vencido|devidos?)[:\s]*R?\$?\s*([\d.,]+)',
+        r'condom[íi]nio[^\n]{0,30}R?\$?\s*([\d.,]+)',
         r'd[ée]bito[s]?\s+(?:de\s+)?condom[íi]nio[:\s]*R?\$?\s*([\d.,]+)',
     ]
     for p in cond_p:
         m = re.search(p, texto, re.IGNORECASE)
         if m:
-            dados["cond_debito"] = limpar_valor(m.group(1))
-            dados["_extraidos"].append("cond_debito")
-            break
+            v = limpar_valor(m.group(1))
+            if 100 < v < 500_000:
+                dados["cond_debito"] = v
+                dados["_extraidos"].append("cond_debito")
+                break
 
-    # ── Matrícula ──
-    mat_p = r'matr[íi]cula\s+(?:n[°º.]?\s*)?([\d.]+)'
-    m = re.search(mat_p, texto, re.IGNORECASE)
-    if m:
-        dados["matricula"] = m.group(1)
-        dados["_extraidos"].append("matricula")
+    # Detectar se a VENDEDORA é responsável pelos débitos propter rem
+    if re.search(r'VENDEDORA\s+ser[aá]\s+respons[aá]vel\s+pelo\s+pagamento\s+de\s+todos\s+os\s+d[eé]bitos\s+propter\s+rem',
+                 texto, re.IGNORECASE):
+        dados["_avisos"].append(
+            "✅ IPTU e condomínio: responsabilidade da VENDEDORA até pagamento (cláusula 4.1)"
+        )
+        dados["_extraidos"].append("debitos_vendedora_confirmado")
 
-    # ── Processo ──
-    proc_p = r'processo\s+(?:n[°º.]?\s*)?([\d.\-\/]+)'
-    m = re.search(proc_p, texto, re.IGNORECASE)
-    if m:
-        dados["numero_processo"] = m.group(1)
-        dados["_extraidos"].append("numero_processo")
-
-    # ── Comarca / Vara ──
-    com_p = r'comarca\s+(?:de\s+)?([\w\s]+?)(?:\n|,|\.|–)'
-    m = re.search(com_p, texto, re.IGNORECASE)
-    if m:
-        dados["comarca"] = m.group(1).strip()
-        dados["_extraidos"].append("comarca")
-
-    vara_p = r'(\d+[aª°]?\s*vara\s+[\w\s]+?)(?:\n|,|\.|–)'
-    m = re.search(vara_p, texto, re.IGNORECASE)
-    if m:
-        dados["vara"] = m.group(1).strip()[:60]
-        dados["_extraidos"].append("vara")
-
-    # ── Flags booleanas ──
-    if re.search(r'ad\s+corpus', texto, re.IGNORECASE):
+    # ── Ad Corpus ──
+    if re.search(r'["\']?[Aa][Dd]\s+[Cc][Oo][Rr][Pp][Uu][Ss]["\']?', texto):
         dados["ad_corpus"] = True
         dados["_extraidos"].append("ad_corpus")
 
-    if re.search(r'(?:venda\s+)?condicionad[ao]|sujeita?\s+(?:à|a)\s+aprovação', texto, re.IGNORECASE):
+    # ── Venda Condicionada ──
+    if re.search(r'(?:VENDA\s+DIRETA\s+)?CONDICIONAD[AO]\s+[AÀ]\s+APROVA[ÇC][ÃA]O|'
+                 r'MAIOR\s+LANCE\s+OU\s+OFERTA\s+CONDICIONAD[AO]|'
+                 r'condicionad[ao]\s+(?:à|a)\s+(?:exclusivo\s+)?crit[eé]rio',
+                 texto, re.IGNORECASE):
         dados["venda_condicionada"] = True
         dados["_extraidos"].append("venda_condicionada")
 
     # ── Comissão ──
-    com_pct_p = r'comiss[aã]o[:\s]*([\d,]+)\s*%'
-    m = re.search(com_pct_p, texto, re.IGNORECASE)
-    if m:
-        dados["comissao_pct"] = limpar_valor(m.group(1))
-        dados["_extraidos"].append("comissao_pct")
+    com_pct_patterns = [
+        r'(\d+(?:[,\.]\d+)?)\s*%\s*\([^)]*cinco[^)]*por\s*cento[^)]*\)[^\n]{0,30}comiss[ãa]o',
+        r'comiss[ãa]o[^\n]{0,50}(\d+(?:[,\.]\d+)?)\s*%',
+        r'(\d+)\s*%\s*\([^)]*\)[^\n]{0,20}comiss[ãa]o',
+        r'a\s+(?:quantia\s+correspondente\s+a\s+)?(\d+(?:[,\.]\d+)?)\s*%[^\n]{0,30}comiss[ãa]o',
+    ]
+    for p in com_pct_patterns:
+        m = re.search(p, texto, re.IGNORECASE)
+        if m:
+            v = limpar_valor(m.group(1))
+            if 0 < v <= 20:
+                dados["comissao_pct"] = v
+                dados["_extraidos"].append("comissao_pct")
+                break
 
     return dados
 
@@ -613,6 +697,10 @@ with st.sidebar:
                 st.session_state.pdf_nome = pdf_file.name
                 n = len(dados["_extraidos"])
                 st.success(f"✅ {n} campos extraídos automaticamente!")
+                for av in dados.get("_avisos", []):
+                    st.warning(av)
+                if dados.get("plataforma"):
+                    st.info(f"🌐 Plataforma: {dados["plataforma"]}")
             else:
                 st.error("Não foi possível ler o PDF. Verifique se não é escaneado.")
 
