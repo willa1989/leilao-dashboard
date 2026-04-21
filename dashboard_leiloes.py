@@ -1263,6 +1263,574 @@ with tab5:
         fig5.update_layout(**PLOTLY_LAYOUT, height=300)
         st.plotly_chart(fig5, use_container_width=True)
 
+# ─────────────────────────────────────────────
+#  PDF REPORT GENERATOR
+# ─────────────────────────────────────────────
+
+def gerar_pdf_relatorio(
+    endereco, regiao, area_util, area_adj, margem_ad,
+    lance_ref, lance_1, lance_2, data_1, data_2, avaliacao,
+    comissao_pct, itbi_pct, outros_custos, outros_deb,
+    iptu_deb, cond_deb,
+    custos_ref, vgv_val, ll_ref, igc_ref, gb_ref,
+    roi_ref, ms_ref, m2_medio,
+    tir_12, tir_18,
+    analise_p, comps,
+    ad_corpus_f, venda_cond_f,
+) -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+        HRFlowable, PageBreak, KeepTogether
+    )
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
+    from reportlab.platypus import Image as RLImage
+    import plotly.io as pio
+    import io as _io
+    from datetime import datetime
+
+    # ── Cores ──
+    C_BG        = colors.HexColor('#060a0e')
+    C_PANEL     = colors.HexColor('#0d1820')
+    C_BLUE      = colors.HexColor('#2a7aaa')
+    C_BLUE_LT   = colors.HexColor('#88ccff')
+    C_GREEN     = colors.HexColor('#00cc88')
+    C_RED       = colors.HexColor('#ff4455')
+    C_YELLOW    = colors.HexColor('#ffaa33')
+    C_PURPLE    = colors.HexColor('#aa55ff')
+    C_ORANGE    = colors.HexColor('#ff6b35')
+    C_TEXT      = colors.HexColor('#c8d8e8')
+    C_MUTED     = colors.HexColor('#4a6a8a')
+    C_BORDER    = colors.HexColor('#1e3448')
+    C_WHITE     = colors.white
+
+    buf = _io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=1.8*cm, rightMargin=1.8*cm,
+        topMargin=1.5*cm, bottomMargin=1.5*cm,
+    )
+    W = A4[0] - 3.6*cm  # usable width
+
+    # ── Estilos ──
+    def sty(name, **kw):
+        base = dict(fontName='Helvetica', fontSize=9, textColor=C_TEXT,
+                    leading=13, spaceAfter=2)
+        base.update(kw)
+        return ParagraphStyle(name, **base)
+
+    S_TITLE  = sty('title',  fontName='Helvetica-Bold', fontSize=20,
+                   textColor=C_WHITE, leading=24, spaceAfter=4)
+    S_SUB    = sty('sub',    fontName='Helvetica', fontSize=8,
+                   textColor=C_MUTED, leading=10, spaceAfter=12)
+    S_H1     = sty('h1',     fontName='Helvetica-Bold', fontSize=11,
+                   textColor=C_BLUE_LT, leading=14, spaceBefore=14, spaceAfter=6)
+    S_H2     = sty('h2',     fontName='Helvetica-Bold', fontSize=9,
+                   textColor=C_MUTED, leading=11, spaceBefore=8, spaceAfter=4)
+    S_BODY   = sty('body')
+    S_MONO   = sty('mono',   fontName='Courier', fontSize=8, textColor=C_TEXT)
+    S_ALERT  = sty('alert',  fontName='Helvetica', fontSize=8,
+                   textColor=C_ORANGE, leading=11)
+    S_GREEN  = sty('green',  fontName='Helvetica-Bold', fontSize=9,
+                   textColor=C_GREEN)
+    S_RED    = sty('red',    fontName='Helvetica-Bold', fontSize=9,
+                   textColor=C_RED)
+    S_CENTER = sty('center', alignment=TA_CENTER)
+    S_RIGHT  = sty('right',  alignment=TA_RIGHT)
+
+    # ── Helpers ──
+    def hr(color=C_BORDER, thickness=0.5):
+        return HRFlowable(width='100%', thickness=thickness,
+                          color=color, spaceAfter=6, spaceBefore=2)
+
+    def kpi_table(items):
+        """items: list of (label, value, color)"""
+        n = len(items)
+        col_w = W / n
+        header_row = [Paragraph(f'<font size="6" color="#{C_MUTED.hexval()[2:]}">{lb}</font>',
+                                 S_MONO) for lb, _, _ in items]
+        value_row  = [Paragraph(f'<font size="14" color="#{c.hexval()[2:]}">'
+                                 f'<b>{vl}</b></font>', S_MONO)
+                      for _, vl, c in items]
+        t = Table([header_row, value_row], colWidths=[col_w]*n)
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), C_PANEL),
+            ('BOX',        (0,0), (-1,-1), 0.5, C_BORDER),
+            ('INNERGRID',  (0,0), (-1,-1), 0.3, C_BORDER),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING',(0,0),(-1,-1), 8),
+            ('LEFTPADDING', (0,0),(-1,-1), 8),
+            ('RIGHTPADDING',(0,0),(-1,-1), 8),
+            ('VALIGN',     (0,0), (-1,-1), 'MIDDLE'),
+        ]))
+        return t
+
+    def data_table(headers, rows, col_widths=None, highlight_last=False):
+        data = [[Paragraph(f'<b><font color="#{C_MUTED.hexval()[2:]}" size="7">{h}</font></b>',
+                            S_MONO) for h in headers]]
+        for i, row in enumerate(rows):
+            data.append([Paragraph(f'<font size="8" color="#{C_TEXT.hexval()[2:]}">{str(c)}</font>',
+                                    S_MONO) for c in row])
+        cw = col_widths or [W/len(headers)]*len(headers)
+        t = Table(data, colWidths=cw, repeatRows=1)
+        style = [
+            ('BACKGROUND', (0,0), (-1,0),  C_BORDER),
+            ('BACKGROUND', (0,1), (-1,-1), C_PANEL),
+            ('BOX',        (0,0), (-1,-1), 0.5, C_BORDER),
+            ('INNERGRID',  (0,0), (-1,-1), 0.3, C_BORDER),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('BOTTOMPADDING',(0,0),(-1,-1), 4),
+            ('LEFTPADDING', (0,0),(-1,-1), 6),
+            ('RIGHTPADDING',(0,0),(-1,-1), 6),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [C_PANEL, colors.HexColor('#0a1218')]),
+        ]
+        if highlight_last:
+            style += [
+                ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#0a1a28')),
+                ('TEXTCOLOR',  (0,-1), (-1,-1), C_BLUE_LT),
+                ('FONTNAME',   (0,-1), (-1,-1), 'Helvetica-Bold'),
+            ]
+        t.setStyle(TableStyle(style))
+        return t
+
+    def alert_box(text, color):
+        t = Table([[Paragraph(text, ParagraphStyle('al', fontName='Helvetica',
+                   fontSize=8, textColor=color, leading=11))]],
+                  colWidths=[W])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#0a0f18')),
+            ('BOX',        (0,0), (-1,-1), 1.5, color),
+            ('LEFTPADDING',(0,0), (-1,-1), 10),
+            ('RIGHTPADDING',(0,0),(-1,-1), 10),
+            ('TOPPADDING', (0,0), (-1,-1), 6),
+            ('BOTTOMPADDING',(0,0),(-1,-1), 6),
+        ]))
+        return t
+
+    def plotly_to_image(fig, width=700, height=300):
+        try:
+            img_bytes = pio.to_image(fig, format='png', width=width, height=height, scale=2)
+            return RLImage(_io.BytesIO(img_bytes), width=W, height=W*height/width)
+        except Exception:
+            return Paragraph('[Gráfico não disponível]', S_MUTED)
+
+    # ── Gerar gráficos ──
+    def make_bar_chart():
+        fig = go.Figure()
+        cats   = ["Lance Ref.", "Custo Total", "Valor Mercado"]
+        values = [lance_ref, custos_ref["total"], vgv_val]
+        bar_c  = ["#1e5a88", "#2a7aaa", "#00cc88" if vgv_val > custos_ref["total"] else "#ff4455"]
+        fig.add_trace(go.Bar(x=cats, y=values, marker_color=bar_c,
+                             text=[fmt(v) for v in values], textposition="outside",
+                             textfont=dict(color="#a8c8e8", size=10)))
+        fig.add_hline(y=custos_ref["total"], line_dash="dot", line_color="#ffaa33", line_width=1)
+        if avaliacao > 0:
+            fig.add_hline(y=avaliacao, line_dash="dash", line_color="#aa55ff", line_width=1)
+        fig.update_layout(**PLOTLY_LAYOUT, height=280,
+                          yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f", showlegend=False)
+        return fig
+
+    def make_waterfall():
+        fig = go.Figure(go.Waterfall(
+            orientation="v",
+            measure=["absolute","relative","relative","relative","relative","total"],
+            x=["Lance","Comissão","ITBI","Escritura","Outros","TOTAL"],
+            y=[lance_ref, custos_ref["comissao"], custos_ref["itbi"],
+               custos_ref["escritura"], custos_ref["outros"], 0],
+            connector=dict(line=dict(color="#1a2e42")),
+            decreasing=dict(marker_color="#ff4455"),
+            increasing=dict(marker_color="#2a7aaa"),
+            totals=dict(marker_color="#00cc88" if vgv_val > custos_ref["total"] else "#ff4455"),
+            texttemplate="%{y:,.0f}", textfont=dict(size=8),
+        ))
+        fig.update_layout(**PLOTLY_LAYOUT, height=260,
+                          yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f")
+        return fig
+
+    def make_sensitivity():
+        descontos  = np.linspace(-0.20, 0.35, 60)
+        lucros_var = []
+        for d_pct in descontos:
+            l_v = lance_ref * (1 - d_pct)
+            c_v = custo_total(l_v, comissao_pct, itbi_pct, outros_custos + outros_deb)
+            ll_v, _, _ = lucro_liq(vgv_val, c_v["total"])
+            lucros_var.append(ll_v)
+        fig = go.Figure()
+        pos = [v >= 0 for v in lucros_var]
+        fig.add_trace(go.Scatter(
+            x=[descontos[i]*100 for i in range(len(descontos)) if pos[i]],
+            y=[lucros_var[i]    for i in range(len(lucros_var)) if pos[i]],
+            fill="tozeroy", fillcolor="rgba(0,204,136,0.10)",
+            line=dict(color="#00cc88", width=2)))
+        fig.add_trace(go.Scatter(
+            x=[descontos[i]*100 for i in range(len(descontos)) if not pos[i]],
+            y=[lucros_var[i]    for i in range(len(lucros_var)) if not pos[i]],
+            fill="tozeroy", fillcolor="rgba(255,68,85,0.10)",
+            line=dict(color="#ff4455", width=2)))
+        fig.add_vline(x=0, line_dash="dot", line_color="#ffaa33", line_width=1)
+        fig.update_layout(**PLOTLY_LAYOUT, height=260, showlegend=False,
+                          xaxis_title="Variação no Lance (%)",
+                          yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f")
+        return fig
+
+    def make_pracas_bar():
+        if not analise_p: return None
+        res = analise_p["resultados"]
+        fig = go.Figure()
+        colors_p = ["#2a7aaa", "#22aa55"]
+        for i, (pname, rdata) in enumerate(res.items()):
+            fig.add_trace(go.Bar(
+                name=pname,
+                x=["Lance Mínimo", "Custo Total", "Lucro Líquido"],
+                y=[rdata["lance"], rdata["custo"], rdata["lucro"]],
+                marker_color=colors_p[i],
+                text=[fmt(v) for v in [rdata["lance"], rdata["custo"], rdata["lucro"]]],
+                textposition="outside", textfont=dict(size=9, color="#a8c8e8"),
+            ))
+        fig.add_hline(y=vgv_val, line_dash="dot", line_color="#ffaa33", line_width=1)
+        fig.update_layout(**PLOTLY_LAYOUT, barmode="group", height=260,
+                          yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f",
+                          showlegend=True,
+                          legend=dict(font=dict(size=9, color="#7a9ab8")))
+        return fig
+
+    # ── Montar story ──
+    story = []
+    now = datetime.now().strftime("%d/%m/%Y às %H:%M")
+
+    # ════════════════════════════════════════
+    # CAPA
+    # ════════════════════════════════════════
+    capa_bg = Table([
+        [Paragraph('LEILÃO INTEL', ParagraphStyle('cp1', fontName='Helvetica-Bold',
+                   fontSize=28, textColor=C_WHITE, leading=32))],
+        [Paragraph('RELATÓRIO DE DUE DILIGENCE · WEALTH MANAGEMENT DESK',
+                   ParagraphStyle('cp2', fontName='Helvetica', fontSize=8,
+                   textColor=C_MUTED, leading=10))],
+        [Spacer(1, 0.3*cm)],
+        [hr(C_BLUE, 1)],
+        [Paragraph(endereco or 'Imóvel não identificado',
+                   ParagraphStyle('cp3', fontName='Helvetica-Bold', fontSize=13,
+                   textColor=C_BLUE_LT, leading=16))],
+        [Paragraph(f'Região: {regiao}  ·  Área útil: {area_util:.1f} m²  ·  '
+                   f'Área adj. (Ad Corpus): {area_adj:.1f} m²',
+                   ParagraphStyle('cp4', fontName='Helvetica', fontSize=8,
+                   textColor=C_TEXT, leading=11))],
+        [Spacer(1, 0.3*cm)],
+        [hr(C_BORDER)],
+        [Paragraph(f'Gerado em {now}  ·  v3.0 · PDF Intelligence Engine',
+                   ParagraphStyle('cp5', fontName='Helvetica', fontSize=7,
+                   textColor=C_MUTED, leading=9))],
+    ], colWidths=[W])
+    capa_bg.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), C_BG),
+        ('BOX',        (0,0), (-1,-1), 1, C_BORDER),
+        ('LEFTPADDING',(0,0), (-1,-1), 16),
+        ('RIGHTPADDING',(0,0),(-1,-1), 16),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING',(0,0),(-1,-1), 4),
+    ]))
+    story.append(capa_bg)
+    story.append(Spacer(1, 0.4*cm))
+
+    # ── Alertas de risco ──
+    if venda_cond_f:
+        story.append(alert_box(
+            '⚠  VENDA CONDICIONADA — Homologação sujeita à aprovação exclusiva do COMITENTE. '
+            'A VENDEDORA pode recusar o lance sem justificativa.', C_ORANGE))
+        story.append(Spacer(1, 0.2*cm))
+    if ad_corpus_f:
+        story.append(alert_box(
+            f'ℹ  AD CORPUS — Imóvel vendido como um todo. Margem de metragem: {margem_ad:.1f}% '
+            f'→ Área ajustada para cálculo: {area_adj:.1f} m²', C_BLUE))
+        story.append(Spacer(1, 0.2*cm))
+    if iptu_deb + cond_deb > 0:
+        story.append(alert_box(
+            f'⚖  DÉBITOS PROPTER REM — IPTU + Condomínio ({fmt(iptu_deb+cond_deb)}) são '
+            'responsabilidade da VENDEDORA até a homologação judicial.', C_PURPLE))
+        story.append(Spacer(1, 0.2*cm))
+
+    # ── KPIs ──
+    story.append(Spacer(1, 0.2*cm))
+    lc = C_GREEN if ll_ref >= 0 else C_RED
+    rc = C_GREEN if roi_ref >= 20 else C_YELLOW if roi_ref >= 10 else C_RED
+    mc = C_GREEN if ms_ref >= 25 else C_YELLOW if ms_ref >= 15 else C_RED
+    story.append(kpi_table([
+        ('CUSTO TOTAL',        fmt(custos_ref['total']), C_BLUE),
+        ('VALOR DE MERCADO',   fmt(vgv_val),             C_BLUE_LT),
+        ('LUCRO LÍQUIDO',      fmt(ll_ref),              lc),
+        ('ROI ESTIMADO',       f'{roi_ref:.1f}%',        rc),
+        ('MARGEM SEGURANÇA',   f'{ms_ref:.1f}%',         mc),
+    ]))
+    story.append(Spacer(1, 0.4*cm))
+
+    # ════════════════════════════════════════
+    # SEÇÃO 1 — 1ª vs 2ª PRAÇA
+    # ════════════════════════════════════════
+    story.append(Paragraph('1.  ANÁLISE DE PRAÇAS', S_H1))
+    story.append(hr(C_BLUE))
+
+    if analise_p and (lance_1 > 0 or lance_2 > 0):
+        res  = analise_p["resultados"]
+        rec  = analise_p["recomendacao"]
+        cor_map = {"blue": C_BLUE, "green": C_GREEN, "yellow": C_YELLOW}
+        rec_cor = cor_map.get(rec["cor"], C_YELLOW)
+
+        # Recomendação
+        story.append(alert_box(
+            f'RECOMENDAÇÃO: {rec["acao"]}  —  {rec["motivo"]}', rec_cor))
+        story.append(Spacer(1, 0.3*cm))
+
+        # Tabela comparativa
+        headers = ["Métrica"] + list(res.keys())
+        metricas_pdf = [
+            ("Lance Mínimo",     "lance",     True),
+            ("Custo Total",      "custo",     True),
+            ("Lucro Líquido",    "lucro",     True),
+            ("ROI",              "roi",       False),
+            ("Margem Segurança", "margem",    False),
+            ("Desc. Avaliação",  "desc_aval", False),
+            ("TIR 12 meses",     "tir12",     None),
+        ]
+        rows = []
+        for label, campo, is_money in metricas_pdf:
+            row = [label]
+            for p in res.keys():
+                v = res[p][campo]
+                if campo == "tir12":
+                    row.append(f"{v*100:.1f}%" if v else "N/C")
+                elif is_money:
+                    row.append(fmt(v))
+                else:
+                    row.append(f"{v:.1f}%")
+            rows.append(row)
+
+        cw = [W*0.35] + [W*0.325]*len(res)
+        story.append(data_table(headers, rows, cw))
+        story.append(Spacer(1, 0.3*cm))
+
+        # Gráfico praças
+        fig_p = make_pracas_bar()
+        if fig_p:
+            story.append(plotly_to_image(fig_p, 700, 260))
+    else:
+        story.append(alert_box(
+            'ℹ Lance(s) de praça não informado(s). Preencha na sidebar para ativar esta seção.', C_BLUE))
+
+    story.append(Spacer(1, 0.5*cm))
+
+    # ════════════════════════════════════════
+    # SEÇÃO 2 — COMPARATIVO
+    # ════════════════════════════════════════
+    story.append(Paragraph('2.  COMPARATIVO: LANCE vs. MERCADO', S_H1))
+    story.append(hr(C_BLUE))
+
+    # Gráfico barras
+    story.append(plotly_to_image(make_bar_chart(), 700, 280))
+    story.append(Spacer(1, 0.2*cm))
+
+    # Gráfico waterfall
+    story.append(Paragraph('Composição de Custos (Waterfall)', S_H2))
+    story.append(plotly_to_image(make_waterfall(), 700, 260))
+    story.append(Spacer(1, 0.5*cm))
+
+    # ════════════════════════════════════════
+    # SEÇÃO 3 — CUSTOS & P&L
+    # ════════════════════════════════════════
+    story.append(Paragraph('3.  CUSTOS DETALHADOS & P&L', S_H1))
+    story.append(hr(C_BLUE))
+
+    # Breakdown de custos
+    story.append(Paragraph('Breakdown de Aquisição', S_H2))
+    bd_headers = ["Item", "Valor (R$)", "% do Lance"]
+    bd_rows = [
+        ["Lance Inicial",        fmt(custos_ref['lance']),    f"{custos_ref['lance']/lance_ref*100:.1f}%" if lance_ref else "—"],
+        ["Comissão Leiloeiro",   fmt(custos_ref['comissao']), f"{custos_ref['comissao']/lance_ref*100:.1f}%" if lance_ref else "—"],
+        ["ITBI",                 fmt(custos_ref['itbi']),     f"{custos_ref['itbi']/lance_ref*100:.1f}%" if lance_ref else "—"],
+        ["Escritura / Cartório", fmt(custos_ref['escritura']),f"{custos_ref['escritura']/lance_ref*100:.1f}%" if lance_ref else "—"],
+        ["Outros (reforma/déb.)",fmt(custos_ref['outros']),   f"{custos_ref['outros']/lance_ref*100:.1f}%" if lance_ref else "—"],
+        ["CUSTO TOTAL",          fmt(custos_ref['total']),    f"{custos_ref['total']/lance_ref*100:.1f}%" if lance_ref else "—"],
+    ]
+    story.append(data_table(bd_headers, bd_rows,
+                            [W*0.45, W*0.30, W*0.25], highlight_last=True))
+    story.append(Spacer(1, 0.3*cm))
+
+    # Débitos
+    story.append(Paragraph('Débitos & Responsabilidades', S_H2))
+    deb_headers = ["Débito", "Valor (R$)", "Responsável"]
+    deb_rows = [
+        ["IPTU Atrasado",        fmt(iptu_deb),           "VENDEDORA ← propter rem"],
+        ["Condomínio Atrasado",  fmt(cond_deb),           "VENDEDORA ← propter rem"],
+        ["Outros → comprador",   fmt(outros_deb),         "COMPRADOR → entra no custo"],
+        ["Total s/ vendedora",   fmt(iptu_deb+cond_deb),  "Exigir quitação prévia"],
+    ]
+    story.append(data_table(deb_headers, deb_rows, [W*0.30, W*0.22, W*0.48]))
+    story.append(Spacer(1, 0.3*cm))
+
+    # P&L
+    story.append(Paragraph('Demonstrativo P&L Projetado', S_H2))
+    pl_headers = ["Item", "Valor (R$)"]
+    pl_rows = [
+        ["VGV (Valor de Mercado)",  fmt(vgv_val)],
+        ["(-) Custo Total",         fmt(-custos_ref['total'])],
+        ["= Ganho Bruto",           fmt(gb_ref)],
+        ["(-) IGC 15% (Imp. Ganho Capital)", fmt(-igc_ref)],
+        ["= LUCRO LÍQUIDO",         fmt(ll_ref)],
+    ]
+    story.append(data_table(pl_headers, pl_rows, [W*0.65, W*0.35], highlight_last=True))
+    story.append(Spacer(1, 0.5*cm))
+
+    # ════════════════════════════════════════
+    # SEÇÃO 4 — TIR & SENSIBILIDADE
+    # ════════════════════════════════════════
+    story.append(Paragraph('4.  TIR & ANÁLISE DE SENSIBILIDADE', S_H1))
+    story.append(hr(C_BLUE))
+
+    # TIR
+    story.append(Paragraph('Taxa Interna de Retorno (TIR Anualizada)', S_H2))
+    tir_headers = ["Horizonte", "TIR Anual", "Classificação"]
+    tir_rows = []
+    for meses, tir in [(12, tir_12), (18, tir_18)]:
+        tir_rows.append([
+            f"{meses} meses",
+            f"{tir*100:.1f}%" if tir else "N/C",
+            "Excelente (>20%)" if tir and tir > 0.20
+            else "Bom (12–20%)" if tir and tir > 0.12
+            else "Atenção (0–12%)" if tir and tir > 0
+            else "Negativo",
+        ])
+    story.append(data_table(tir_headers, tir_rows, [W*0.28, W*0.28, W*0.44]))
+    story.append(Spacer(1, 0.2*cm))
+
+    # Indicadores
+    story.append(Paragraph('Indicadores Financeiros', S_H2))
+    ind_headers = ["Indicador", "Valor"]
+    ind_rows = [
+        ["Múltiplo VGV/Custo",    f"{vgv_val/custos_ref['total']:.2f}x" if custos_ref['total'] else "—"],
+        ["R$/m² Adquirido",       f"R$ {custos_ref['total']/area_adj:,.0f}" if area_adj else "—"],
+        ["R$/m² Mercado (média)", f"R$ {m2_medio:,.0f}"],
+        ["Spread m² (mercado-adq.)", f"R$ {m2_medio - custos_ref['total']/area_adj:,.0f}" if area_adj else "—"],
+        ["Lance / Avaliação",     f"{lance_ref/avaliacao*100:.1f}%" if avaliacao and lance_ref else "—"],
+        ["Margem de Segurança",   f"{ms_ref:.1f}%"],
+        ["ROI Estimado",          f"{roi_ref:.1f}%"],
+    ]
+    story.append(data_table(ind_headers, ind_rows, [W*0.60, W*0.40]))
+    story.append(Spacer(1, 0.3*cm))
+
+    # Gráfico sensibilidade
+    story.append(Paragraph('Sensibilidade: Lucro Líquido vs. Variação do Lance', S_H2))
+    story.append(plotly_to_image(make_sensitivity(), 700, 260))
+    story.append(Spacer(1, 0.5*cm))
+
+    # ════════════════════════════════════════
+    # SEÇÃO 5 — COMPARÁVEIS
+    # ════════════════════════════════════════
+    story.append(Paragraph('5.  PESQUISA DE MERCADO · COMPARÁVEIS', S_H1))
+    story.append(hr(C_BLUE))
+
+    comp_headers = ["Endereço", "Área (m²)", "Preço Total", "R$/m²"]
+    comp_rows = []
+    for c in comps:
+        comp_rows.append([
+            c["Endereço"][:40],
+            f"{c['Área (m²)']}",
+            fmt(c["Preço Total"]),
+            f"R$ {c['R$/m²']:,.0f}",
+        ])
+    story.append(data_table(comp_headers, comp_rows,
+                            [W*0.46, W*0.14, W*0.22, W*0.18]))
+    story.append(Spacer(1, 0.3*cm))
+
+    # Resumo comparáveis
+    story.append(Paragraph('Resumo Estatístico dos Comparáveis', S_H2))
+    pm2_list = [c["R$/m²"] for c in comps]
+    stat_headers = ["Estatística", "R$/m²", "Impacto no VGV"]
+    stat_rows = [
+        ["Mínimo",  f"R$ {min(pm2_list):,.0f}", fmt(min(pm2_list) * area_adj)],
+        ["Média",   f"R$ {np.mean(pm2_list):,.0f}", fmt(np.mean(pm2_list) * area_adj)],
+        ["Máximo",  f"R$ {max(pm2_list):,.0f}", fmt(max(pm2_list) * area_adj)],
+        ["Imóvel (custo/m²)", f"R$ {custos_ref['total']/area_adj:,.0f}" if area_adj else "—",
+         f"Lance: {fmt(lance_ref)}"],
+    ]
+    story.append(data_table(stat_headers, stat_rows,
+                            [W*0.35, W*0.30, W*0.35], highlight_last=True))
+    story.append(Spacer(1, 0.5*cm))
+
+    # ════════════════════════════════════════
+    # RODAPÉ LEGAL
+    # ════════════════════════════════════════
+    story.append(hr(C_BORDER, 0.5))
+    disc = Table([[Paragraph(
+        'AVISO LEGAL: Este relatório foi gerado automaticamente pelo sistema LEILÃO INTEL v3.0 '
+        'com base nos dados inseridos pelo usuário. As projeções financeiras são estimativas e '
+        'não constituem oferta, recomendação ou aconselhamento de investimento. '
+        'Os valores de mercado são baseados em comparáveis sintéticos regionais. '
+        'O investidor deve realizar due diligence independente antes de tomar qualquer decisão. '
+        f'Gerado em {now}.',
+        ParagraphStyle('disc', fontName='Helvetica', fontSize=6.5,
+                       textColor=C_MUTED, leading=9)
+    )]], colWidths=[W])
+    disc.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), C_BG),
+        ('LEFTPADDING',(0,0), (-1,-1), 8),
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING',(0,0),(-1,-1), 6),
+    ]))
+    story.append(disc)
+
+    # ── Build ──
+    doc.build(story)
+    buf.seek(0)
+    return buf.read()
+
+
+# ── BOTÃO DE EXPORTAÇÃO ──
+st.markdown("<div style='height:1.5rem'></div>", unsafe_allow_html=True)
+st.markdown("""
+<div style='font-family:Share Tech Mono,monospace;font-size:0.65rem;
+            letter-spacing:3px;color:#2a5a8a;margin-bottom:0.5rem'>
+    // EXPORTAR ANÁLISE COMPLETA
+</div>""", unsafe_allow_html=True)
+
+col_btn1, col_btn2, col_btn3 = st.columns([2, 1, 3])
+with col_btn1:
+    if st.button("⬇  GERAR RELATÓRIO PDF", use_container_width=True):
+        if lance_ref == 0:
+            st.error("⚠ Informe o lance mínimo antes de gerar o relatório.")
+        else:
+            with st.spinner("Gerando relatório PDF..."):
+                try:
+                    pdf_bytes = gerar_pdf_relatorio(
+                        endereco=endereco, regiao=regiao,
+                        area_util=area_util, area_adj=area_adj, margem_ad=margem_ad,
+                        lance_ref=lance_ref, lance_1=lance_1, lance_2=lance_2,
+                        data_1=data_1, data_2=data_2, avaliacao=avaliacao,
+                        comissao_pct=comissao_pct, itbi_pct=itbi_pct,
+                        outros_custos=outros_custos, outros_deb=outros_deb,
+                        iptu_deb=iptu_deb, cond_deb=cond_deb,
+                        custos_ref=custos_ref, vgv_val=vgv_val,
+                        ll_ref=ll_ref, igc_ref=igc_ref, gb_ref=gb_ref,
+                        roi_ref=roi_ref, ms_ref=ms_ref, m2_medio=m2_medio,
+                        tir_12=tir_12, tir_18=tir_18,
+                        analise_p=analise_p, comps=comps,
+                        ad_corpus_f=ad_corpus_f, venda_cond_f=venda_cond_f,
+                    )
+                    from datetime import datetime
+                    nome_arquivo = f"leilao_intel_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf"
+                    st.download_button(
+                        label="📄 BAIXAR PDF",
+                        data=pdf_bytes,
+                        file_name=nome_arquivo,
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                    st.success("✅ Relatório gerado! Clique em 'BAIXAR PDF' acima.")
+                except Exception as e:
+                    st.error(f"Erro ao gerar PDF: {e}")
+
 # ── FOOTER ──
 st.markdown("""
 <hr style='border:none;border-top:1px solid #1a2e42;margin:2rem 0 0.8rem'>
