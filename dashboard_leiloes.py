@@ -1415,7 +1415,7 @@ def gerar_pdf_relatorio(
             img_bytes = pio.to_image(fig, format='png', width=width, height=height, scale=2)
             return RLImage(_io.BytesIO(img_bytes), width=W, height=W*height/width)
         except Exception:
-            return Paragraph('[Gráfico não disponível]', S_MUTED)
+            return Paragraph('[Gráfico não disponível]', S_MONO)
 
     # ── Gerar gráficos ──
     def make_bar_chart():
