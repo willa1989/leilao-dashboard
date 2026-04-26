@@ -25,6 +25,13 @@ try:
 except ImportError:
     MARKET_ENGINE_OK = False
 
+# ── Edital Parser Universal ──────────────────
+try:
+    from edital_parser import parse_edital as parse_edital_v2
+    PARSER_V2_OK = True
+except ImportError:
+    PARSER_V2_OK = False
+
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
 # ─────────────────────────────────────────────
@@ -720,12 +727,17 @@ with st.sidebar:
             pdf_bytes = pdf_file.read()
             texto = extrair_texto_pdf(pdf_bytes)
             if texto:
-                dados = parse_edital(texto)
+                # Usa parser v2 (universal) se disponível
+                parser_fn = parse_edital_v2 if PARSER_V2_OK else parse_edital
+                dados = parser_fn(texto)
                 st.session_state.dados_edital = dados
                 st.session_state.pdf_texto = texto
                 st.session_state.pdf_nome = pdf_file.name
                 n = len(dados["_extraidos"])
-                st.success(f"✅ {n} campos extraídos automaticamente!")
+                leiloeira_nome = dados.get("leiloeira_nome", "")
+                tipo = dados.get("tipo_leilao", "")
+                badge = f" · {leiloeira_nome}" if leiloeira_nome else ""
+                st.success(f"✅ {n} campos extraídos automaticamente{badge}")
                 for av in dados.get("_avisos", []):
                     st.warning(av)
                 if dados.get("plataforma"):
@@ -884,6 +896,61 @@ if deb_vendedora > 0:
     </div>""", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
+#  MARKET INTELLIGENCE TRIGGER
+# ─────────────────────────────────────────────
+
+if buscar_mercado_btn:
+    if not endereco:
+        st.warning("⚠ Preencha o endereço do imóvel antes de buscar.")
+    elif not MARKET_ENGINE_OK:
+        st.error("❌ market_engine.py não encontrado. Certifique-se que está no mesmo diretório.")
+    else:
+        with st.spinner("🔍 Geocodificando endereço e buscando preços de mercado... (10-15s)"):
+            try:
+                mr = buscar_mercado(
+                    endereco=endereco,
+                    area_util=area_util,
+                    gmaps_key=gmaps_key,
+                    usar_scraping=usar_scraping,
+                    tipo_imovel=tipo_imovel,
+                )
+                st.session_state.market_result = mr
+                # Atualiza comps com dados reais — substitui estimativa regional
+                if mr and mr.comparaveis:
+                    comps_reais = []
+                    for c in mr.comparaveis:
+                        if c.preco_m2 > 0:
+                            comps_reais.append({
+                                "Endereço": c.endereco[:50] if c.endereco else mr.bairro,
+                                "Área (m²)": round(c.area_m2, 1),
+                                "Preço Total": round(c.preco_total, 0),
+                                "R$/m²": round(c.preco_m2, 0),
+                                "Fonte": c.fonte,
+                            })
+                    if comps_reais:
+                        # Salva com chave especial "market_real" para não misturar com cache regional
+                        st.session_state.comps_cache["__market_real__"] = comps_reais
+                        st.success(f"✅ {len(comps_reais)} comparáveis encontrados para {mr.bairro}, {mr.cidade} · R$/m² médio: R$ {mr.preco_m2_medio:,.0f}")
+                    else:
+                        st.info(f"ℹ Scraping bloqueado — usando FipeZap: R$ {mr.preco_m2_fipezap:,.0f}/m² para {mr.bairro or mr.cidade}")
+                        # Gera comparáveis sintéticos baseados no FipeZap real do bairro
+                        import random as _rnd
+                        comps_fipe = []
+                        for i, var in enumerate([-0.08, 0.0, +0.08]):
+                            pm2 = mr.preco_m2_fipezap * (1 + var)
+                            ar  = area_util * _rnd.uniform(0.88, 1.12)
+                            comps_fipe.append({
+                                "Endereço": f"Ref. {['A','B','C'][i]} — {mr.bairro or mr.cidade}",
+                                "Área (m²)": round(ar, 1),
+                                "Preço Total": round(pm2 * ar, 0),
+                                "R$/m²": round(pm2, 0),
+                                "Fonte": f"FipeZap · {mr.fonte_principal}",
+                            })
+                        st.session_state.comps_cache["__market_real__"] = comps_fipe
+            except Exception as e:
+                st.error(f"Erro na busca de mercado: {e}")
+
+# ─────────────────────────────────────────────
 #  ENGINE DE CÁLCULO
 # ─────────────────────────────────────────────
 
@@ -894,10 +961,15 @@ lance_ref = lance_1 if lance_1 > 0 else lance_2
 lance_op  = lance_atual if lance_atual > 0 else lance_ref
 tem_lance_atual = lance_atual > 0 and lance_atual != lance_ref
 
-# Cache comparáveis por região para garantir consistência entre site e PDF
-if regiao not in st.session_state.comps_cache:
+# Usa comparáveis reais do market engine se disponível, senão estimativa regional
+if "__market_real__" in st.session_state.comps_cache:
+    comps = st.session_state.comps_cache["__market_real__"]
+elif regiao not in st.session_state.comps_cache:
     st.session_state.comps_cache[regiao] = get_comps(regiao)
-comps        = st.session_state.comps_cache[regiao]
+    comps = st.session_state.comps_cache[regiao]
+else:
+    comps = st.session_state.comps_cache[regiao]
+
 precos_m2    = [c["R$/m²"] for c in comps]
 m2_medio     = np.mean(precos_m2)
 area_adj     = area_util * (1 - margem_ad / 100)
