@@ -18,6 +18,13 @@ try:
 except ImportError:
     PDF_OK = False
 
+# ── Market Intelligence Engine ──────────────
+try:
+    from market_engine import buscar_mercado, MarketResult
+    MARKET_ENGINE_OK = True
+except ImportError:
+    MARKET_ENGINE_OK = False
+
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
 # ─────────────────────────────────────────────
@@ -672,6 +679,10 @@ if "pdf_nome" not in st.session_state:
     st.session_state.pdf_nome = ""
 if "comps_cache" not in st.session_state:
     st.session_state.comps_cache = {}
+if "market_result" not in st.session_state:
+    st.session_state.market_result = None
+if "market_loading" not in st.session_state:
+    st.session_state.market_loading = False
 
 # ─────────────────────────────────────────────
 #  SIDEBAR
@@ -787,6 +798,20 @@ with st.sidebar:
     st.markdown('<div class="section-header">// FLAGS DE RISCO</div>', unsafe_allow_html=True)
     ad_corpus_f  = st.checkbox("⚠ Ad Corpus",          value=bool(val("ad_corpus", False)))
     venda_cond_f = st.checkbox("⚠ Venda Condicionada", value=bool(val("venda_condicionada", False)))
+
+    # ── MARKET INTELLIGENCE ──
+    st.markdown('<div class="section-header">// MARKET INTELLIGENCE</div>', unsafe_allow_html=True)
+    gmaps_key = st.text_input(
+        "Google Maps API Key (opcional)",
+        value="", type="password",
+        placeholder="AIza... (deixe vazio para usar OSM)",
+        help="Melhora a geocodificação. Obtenha em console.cloud.google.com"
+    )
+    usar_scraping = st.checkbox("Buscar comparáveis reais (ZAP/VivaReal/OLX)",
+                                value=True,
+                                help="Faz scraping dos portais. Pode demorar 10-15s.")
+    tipo_imovel   = st.selectbox("Tipo de imóvel", ["apartamento", "casa", "cobertura"], index=0)
+    buscar_mercado_btn = st.button("🔍  BUSCAR PREÇO DE MERCADO", use_container_width=True)
 
     run = st.button("⬡  ANALISAR EDITAL", use_container_width=True)
 
@@ -1335,25 +1360,76 @@ with tab4:
 #  TAB 5 · COMPARÁVEIS
 # ────────────────────────────────────
 with tab5:
-    st.markdown('<div class="section-header">// PESQUISA DE MERCADO · COMPARÁVEIS</div>',
-                unsafe_allow_html=True)
+    mr = st.session_state.get("market_result")
+
+    # ── Header + status ──
+    col_mh, col_ms = st.columns([3, 1])
+    with col_mh:
+        st.markdown('<div class="section-header">// MARKET INTELLIGENCE · COMPARÁVEIS</div>',
+                    unsafe_allow_html=True)
+    with col_ms:
+        if mr:
+            conf_color = {"Alta": "#00cc88", "Média": "#ffaa33", "Baixa": "#ff4455"}.get(mr.confiabilidade, "#4a6a8a")
+            st.markdown(f"""<div style='text-align:right;font-family:Share Tech Mono,monospace;
+                font-size:0.62rem;color:{conf_color};padding-top:0.3rem'>
+                ● DADOS {mr.confiabilidade.upper()}</div>""", unsafe_allow_html=True)
+
+    # ── Call to action se não pesquisou ainda ──
+    if not mr:
+        st.markdown("""
+        <div class='alert-blue'>
+            🔍 Clique em <strong>BUSCAR PREÇO DE MERCADO</strong> na sidebar para obter
+            preços reais de mercado via FipeZap + ZAP Imóveis + VivaReal + OLX
+            para o bairro deste imóvel.<br><br>
+            Enquanto isso, os comparáveis abaixo são estimativas regionais.
+        </div>""", unsafe_allow_html=True)
+    else:
+        # ── Painel de inteligência de mercado ──
+        st.markdown(f"""
+        <div class='alert-green'>
+            ✅ MERCADO IDENTIFICADO: <strong>{mr.bairro.title()}, {mr.cidade}</strong>
+            &nbsp;·&nbsp; FipeZap: <strong>R$ {mr.preco_m2_fipezap:,.0f}/m²</strong>
+            &nbsp;·&nbsp; Média comparáveis: <strong>R$ {mr.preco_m2_medio:,.0f}/m²</strong>
+            &nbsp;·&nbsp; {mr.nota}
+        </div>""", unsafe_allow_html=True)
+
+        # KPIs de mercado
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        def mkt_kpi(label, val, color="#2a7aaa"):
+            return f"""<div class='kpi-card' style='border-top-color:{color}'>
+                <div class='kpi-label'>{label}</div>
+                <div class='kpi-value' style='color:{color};font-size:1.3rem'>{val}</div></div>"""
+        with mc1: st.markdown(mkt_kpi("FIPEZAP · BAIRRO",     f"R$ {mr.preco_m2_fipezap:,.0f}/m²", "#2a7aaa"), unsafe_allow_html=True)
+        with mc2: st.markdown(mkt_kpi("MÉDIA COMPARÁVEIS",     f"R$ {mr.preco_m2_medio:,.0f}/m²",   "#4a9acc"), unsafe_allow_html=True)
+        with mc3: st.markdown(mkt_kpi("MÍNIMO REGIÃO",         f"R$ {mr.preco_m2_min:,.0f}/m²",     "#6ab8cc"), unsafe_allow_html=True)
+        with mc4: st.markdown(mkt_kpi("MÁXIMO REGIÃO",         f"R$ {mr.preco_m2_max:,.0f}/m²",     "#88ccee"), unsafe_allow_html=True)
+        st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
+
+    # ── Tabela de comparáveis ──
+    st.markdown('<div class="section-header">// IMÓVEIS COMPARÁVEIS</div>', unsafe_allow_html=True)
     comp_df = pd.DataFrame(comps)
     disp = comp_df.copy()
     disp["Preço Total"] = disp["Preço Total"].apply(fmt)
     disp["R$/m²"]       = disp["R$/m²"].apply(lambda x: f"R$ {x:,.0f}")
+    # Adiciona coluna Fonte se não existir
+    if "Fonte" not in disp.columns:
+        disp["Fonte"] = "Estimativa regional"
     st.dataframe(disp, hide_index=True, use_container_width=True)
 
     cr, cs = st.columns(2)
     with cr:
         fig4 = go.Figure()
+        marker_colors = ["#2a7aaa","#4a9acc","#6ab8cc","#3a8aaa","#5aaabb","#7ababc"]
         fig4.add_trace(go.Scatter(
             x=[c["Área (m²)"] for c in comps],
             y=[c["Preço Total"] for c in comps],
             mode="markers+text",
             text=[f"Comp {i+1}" for i in range(len(comps))],
             textposition="top center",
-            marker=dict(size=14, color=["#2a7aaa","#4a9acc","#6ab8cc"],
+            marker=dict(size=14,
+                        color=marker_colors[:len(comps)],
                         line=dict(color="#88ccff", width=1)),
+            name="Comparáveis",
         ))
         if area_util > 0 and lance_ref > 0:
             fig4.add_trace(go.Scatter(
@@ -1371,14 +1447,22 @@ with tab5:
                             line=dict(color="#ffcc55", width=2)),
                 name="Lance Atual",
             ))
+        # Linha VGV (valor de mercado estimado do imóvel)
+        if vgv_val > 0:
+            fig4.add_hline(y=vgv_val, line_dash="dot", line_color="#00cc88", line_width=1,
+                           annotation_text=" VGV estimado",
+                           annotation_font=dict(color="#00cc88", size=9))
         fig4.update_layout(**PLOTLY_LAYOUT, title="Dispersão · Área vs. Preço",
                            xaxis_title="Área (m²)",
                            yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f",
-                           showlegend=False, height=300)
+                           showlegend=True,
+                           legend=dict(font=dict(family="Share Tech Mono", size=8, color="#7a9ab8")),
+                           height=320)
         st.plotly_chart(fig4, use_container_width=True)
 
     with cs:
         pct_mercado = (lance_op / vgv_val * 100) if vgv_val > 0 and lance_op > 0 else 50
+        # Gauge duplo: lance op + fipezap se disponível
         fig5 = go.Figure(go.Indicator(
             mode="gauge+number+delta",
             value=pct_mercado,
@@ -1399,10 +1483,34 @@ with tab5:
                 threshold=dict(line=dict(color="#00cc88", width=2), value=80),
             ),
         ))
-        fig5.update_layout(**PLOTLY_LAYOUT, height=300,
-            title=dict(text="Lance / Valor de Mercado",
+        fig5.update_layout(**PLOTLY_LAYOUT, height=320,
+            title=dict(text=f"Lance {'Atual' if tem_lance_atual else 'Mínimo'} / VGV Mercado",
                        font=dict(family="Share Tech Mono", color="#4a6a8a", size=10)))
         st.plotly_chart(fig5, use_container_width=True)
+
+    # ── Gráfico R$/m² comparado ──
+    if mr:
+        st.markdown('<div class="section-header">// R$/m² · COMPARATIVO COMPLETO</div>',
+                    unsafe_allow_html=True)
+        labels  = ["FipeZap Bairro", "Média Comparáveis", "Mín. Região", "Máx. Região",
+                   f"Lance {'Atual' if tem_lance_atual else 'Mín.'}/m²"]
+        valores = [mr.preco_m2_fipezap, mr.preco_m2_medio, mr.preco_m2_min, mr.preco_m2_max,
+                   custos_op["total"] / area_adj if area_adj else 0]
+        cores   = ["#2a7aaa", "#4a9acc", "#1a5a88", "#6ab8cc",
+                   "#ffaa33" if tem_lance_atual else "#4a9acc"]
+
+        fig6 = go.Figure(go.Bar(
+            x=labels, y=valores,
+            marker=dict(color=cores, line=dict(color=cores, width=0)),
+            text=[f"R$ {v:,.0f}" for v in valores],
+            textposition="outside",
+            textfont=dict(family="Share Tech Mono", size=10, color="#a8c8e8"),
+        ))
+        fig6.update_layout(**PLOTLY_LAYOUT,
+                           title="R$/m² · FipeZap vs. Comparáveis vs. Lance",
+                           yaxis_tickprefix="R$ ", yaxis_tickformat=",.0f",
+                           showlegend=False, height=280)
+        st.plotly_chart(fig6, use_container_width=True)
 
 # ─────────────────────────────────────────────
 #  PDF REPORT GENERATOR
