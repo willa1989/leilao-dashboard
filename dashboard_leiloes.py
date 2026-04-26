@@ -32,6 +32,13 @@ try:
 except ImportError:
     PARSER_V2_OK = False
 
+# ── Gemini Parser ─────────────────────────────
+try:
+    from gemini_parser import extrair_com_gemini, get_api_key
+    GEMINI_OK = True
+except ImportError:
+    GEMINI_OK = False
+
 # ─────────────────────────────────────────────
 #  PAGE CONFIG
 # ─────────────────────────────────────────────
@@ -723,27 +730,52 @@ with st.sidebar:
     )
 
     if pdf_file and pdf_file.name != st.session_state.pdf_nome:
-        with st.spinner("Lendo edital..."):
-            pdf_bytes = pdf_file.read()
-            texto = extrair_texto_pdf(pdf_bytes)
-            if texto:
-                # Usa parser v2 (universal) se disponível
-                parser_fn = parse_edital_v2 if PARSER_V2_OK else parse_edital
-                dados = parser_fn(texto)
-                st.session_state.dados_edital = dados
-                st.session_state.pdf_texto = texto
-                st.session_state.pdf_nome = pdf_file.name
-                n = len(dados["_extraidos"])
-                leiloeira_nome = dados.get("leiloeira_nome", "")
-                tipo = dados.get("tipo_leilao", "")
-                badge = f" · {leiloeira_nome}" if leiloeira_nome else ""
-                st.success(f"✅ {n} campos extraídos automaticamente{badge}")
-                for av in dados.get("_avisos", []):
-                    st.warning(av)
-                if dados.get("plataforma"):
-                    st.info(f"🌐 Plataforma: {dados["plataforma"]}")
-            else:
-                st.error("Não foi possível ler o PDF. Verifique se não é escaneado.")
+        pdf_bytes = pdf_file.read()
+        gemini_key = get_api_key() if GEMINI_OK else ""
+
+        if GEMINI_OK and gemini_key:
+            # ── MODO GEMINI (IA) ──
+            with st.spinner("🤖 Gemini lendo o edital... (15-20s)"):
+                dados = extrair_com_gemini(pdf_bytes, gemini_key)
+                if dados:
+                    st.session_state.dados_edital = dados
+                    st.session_state.pdf_texto = ""
+                    st.session_state.pdf_nome = pdf_file.name
+                    n = len(dados["_extraidos"])
+                    leiloeira = dados.get("leiloeira_nome", "")
+                    badge = f" · {leiloeira}" if leiloeira else ""
+                    st.success(f"🤖 Gemini extraiu {n} campos{badge}")
+                    for av in dados.get("_avisos", []):
+                        st.warning(av)
+                else:
+                    # Fallback para parser regex se Gemini falhar
+                    st.warning("⚠ Gemini falhou — usando parser regex...")
+                    texto = extrair_texto_pdf(pdf_bytes)
+                    if texto:
+                        parser_fn = parse_edital_v2 if PARSER_V2_OK else parse_edital
+                        dados = parser_fn(texto)
+                        st.session_state.dados_edital = dados
+                        st.session_state.pdf_texto = texto
+                        st.session_state.pdf_nome = pdf_file.name
+                        st.info(f"📄 Regex: {len(dados['_extraidos'])} campos extraídos")
+        else:
+            # ── MODO REGEX (sem Gemini) ──
+            with st.spinner("📄 Lendo edital..."):
+                texto = extrair_texto_pdf(pdf_bytes)
+                if texto:
+                    parser_fn = parse_edital_v2 if PARSER_V2_OK else parse_edital
+                    dados = parser_fn(texto)
+                    st.session_state.dados_edital = dados
+                    st.session_state.pdf_texto = texto
+                    st.session_state.pdf_nome = pdf_file.name
+                    n = len(dados["_extraidos"])
+                    leiloeira_nome = dados.get("leiloeira_nome", "")
+                    badge = f" · {leiloeira_nome}" if leiloeira_nome else ""
+                    st.success(f"✅ {n} campos extraídos{badge}")
+                    for av in dados.get("_avisos", []):
+                        st.warning(av)
+                else:
+                    st.error("❌ Não foi possível ler o PDF.")
 
     d = st.session_state.dados_edital
 
@@ -841,11 +873,23 @@ with col_t:
     </div>""", unsafe_allow_html=True)
 with col_tag:
     if st.session_state.pdf_nome:
+        d_loaded = st.session_state.dados_edital
+        fonte = d_loaded.get("_fonte", "regex") if d_loaded else "regex"
+        if fonte == "gemini":
+            badge_txt = "🤖 GEMINI"
+            badge_color = "#aa55ff"
+            badge_bg = "#0f0a1a"
+            badge_border = "#6633cc"
+        else:
+            badge_txt = "📄 PDF CARREGADO"
+            badge_color = "#4acc88"
+            badge_bg = "#0a2010"
+            badge_border = "#1a5a2a"
         st.markdown(f"""
         <div style='text-align:right;padding-top:0.6rem'>
-            <div style='display:inline-block;background:#0a2010;border:1px solid #1a5a2a;
+            <div style='display:inline-block;background:{badge_bg};border:1px solid {badge_border};
                         border-radius:3px;padding:0.3rem 0.8rem;font-family:Share Tech Mono,monospace;
-                        font-size:0.62rem;letter-spacing:2px;color:#4acc88'>PDF CARREGADO</div>
+                        font-size:0.62rem;letter-spacing:2px;color:{badge_color}'>{badge_txt}</div>
         </div>""", unsafe_allow_html=True)
     else:
         st.markdown("""
@@ -863,11 +907,16 @@ if st.session_state.pdf_nome:
     d_ext = st.session_state.dados_edital
     n_campos = len(d_ext.get("_extraidos", []))
     campos_nomes = ", ".join(d_ext.get("_extraidos", []))
+    fonte_extr = d_ext.get("_fonte", "regex")
+    icone = "🤖 GEMINI" if fonte_extr == "gemini" else "📄 REGEX"
+    tipo_leil = d_ext.get("tipo_leilao", "")
+    leil_nome = d_ext.get("leiloeira_nome", "")
+    info_extra = f" · {leil_nome}" if leil_nome else ""
+    info_extra += f" · {tipo_leil}" if tipo_leil else ""
     st.markdown(f"""
     <div class='pdf-status'>
-        ✅ EDITAL CARREGADO: {st.session_state.pdf_nome} &nbsp;·&nbsp;
-        {n_campos} CAMPOS EXTRAÍDOS AUTOMATICAMENTE &nbsp;·&nbsp;
-        {campos_nomes}
+        {icone} &nbsp;·&nbsp; {st.session_state.pdf_nome}{info_extra} &nbsp;·&nbsp;
+        {n_campos} CAMPOS EXTRAÍDOS &nbsp;·&nbsp; {campos_nomes}
     </div>""", unsafe_allow_html=True)
 
 # ── Alerts de risco ──
